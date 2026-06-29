@@ -1,6 +1,6 @@
 ---
 name: gospelo-mediakit
-description: AI 映像制作向けの動画ユーティリティ。(1) 最初/最後のフレームを png 等で書き出す mediakit_extract_frames、(2) 速度変更(4秒→1秒など。フレームレート維持・音声ピッチ/音量不変)の mediakit_change_speed。実装は mcp-server/gospelo-mediakit/ の MCP サーバ(ffmpeg ベースの決定論的処理)が持ち、Claude Code は .mcp.json 経由で MCP ツールとして直接呼ぶ。返り値に input_format/output_format と processing(適用フィルタ・ffmpeg コマンド全文)を含む。
+description: AI 映像制作向けの動画ユーティリティ。(1) 最初/最後のフレームを png 等で書き出す mediakit_extract_frames、(2) 速度変更(4秒→1秒など。フレームレート維持・音声ピッチ/音量不変)の mediakit_change_speed。実装は gospelo_mediakit パッケージ(配布物 gospelo-mediakit-mcp、ffmpeg ベースの決定論的処理)が持ち、Claude Code は .mcp.json 経由で MCP ツールとして直接呼ぶ。返り値に input_format/output_format と processing(適用フィルタ・ffmpeg コマンド全文)を含む。
 allowed-tools: mcp__gospelo-mediakit__mediakit_extract_frames mcp__gospelo-mediakit__mediakit_change_speed Read Bash(ffmpeg:*) Bash(ffprobe:*)
 ---
 
@@ -9,8 +9,8 @@ allowed-tools: mcp__gospelo-mediakit__mediakit_extract_frames mcp__gospelo-media
 AI 映像制作向けの動画ユーティリティ。**(1) 最初/最後のフレーム抽出**と
 **(2) 速度変更(fps 維持・ピッチ/音量不変)** を提供するスキル。
 
-> **実装は MCP サーバ。** ロジックの実体は `mcp-server/gospelo-mediakit/` の MCP サーバ
-> (内部は `gospelo_mediakit.core` の ffmpeg ラッパー) が持つ。Claude Code は
+> **実装は MCP サーバ。** ロジックの実体は `gospelo_mediakit` パッケージの MCP サーバ
+> (`mcp_server.py` + `gospelo_mediakit.core` の ffmpeg ラッパー) が持つ。Claude Code は
 > プロジェクトルートの `.mcp.json` 経由で **`mediakit_extract_frames` を MCP ツールとして
 > 直接呼び出す**。Codex 版 ([`skills/codex/gospelo-mediakit/`](../../codex/gospelo-mediakit/SKILL.md))
 > と同じ venv バイナリを共有する。
@@ -108,5 +108,5 @@ mediakit_change_speed {
 
 ## See also
 
-- [mcp-server/gospelo-mediakit/README.md](../../../mcp-server/gospelo-mediakit/README.md) — サーバ実装の概要
+- [README_jp.md](../../../README_jp.md) — パッケージ全体の概要
 - [skills/codex/gospelo-mediakit/SKILL.md](../../codex/gospelo-mediakit/SKILL.md) — Codex 版

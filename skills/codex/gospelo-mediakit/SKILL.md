@@ -1,6 +1,6 @@
 ---
 name: gospelo-mediakit
-description: Video utilities for AI video production. (1) mediakit_extract_frames — first/last frame to image files. (2) mediakit_change_speed — re-time a clip (e.g. 4s->1s) keeping frame rate and audio pitch/volume. The MCP server (mcp-server/gospelo-mediakit/) does the deterministic ffmpeg work; Codex calls the MCP tools. Results include input_format/output_format and a processing block (filters applied + full ffmpeg command). Shares the same venv binary (~/.codex/config.toml) as the Codex App and the Claude flavours.
+description: Video utilities for AI video production. (1) mediakit_extract_frames — first/last frame to image files. (2) mediakit_change_speed — re-time a clip (e.g. 4s->1s) keeping frame rate and audio pitch/volume. The gospelo_mediakit package (distribution gospelo-mediakit-mcp) does the deterministic ffmpeg work; Codex calls the MCP tools. Results include input_format/output_format and a processing block (filters applied + full ffmpeg command). Registered once in ~/.codex/config.toml, shared by the Codex CLI and App.
 ---
 
 # gospelo-mediakit (Codex flavour)
@@ -17,16 +17,16 @@ call them. Do **not** re-implement ffmpeg/OpenCV inline.
 
 ## One-time setup
 
-From the repo root:
+Once the package is published, register the zero-install runner (all OSes):
 
 ```bash
-bash skills/setup.sh
+codex mcp add gospelo-mediakit -- uvx gospelo-mediakit-mcp
 ```
 
-This builds the MCP server venv and registers it with Codex
-(`codex mcp add gospelo-mediakit -- <repo>/mcp-server/gospelo-mediakit/venv/bin/gospelo-mediakit-mcp`).
-Re-open the Codex session afterwards so the tool is available. Requires
-`ffmpeg` (and optionally `ffprobe`) on PATH.
+For local development of this repo instead, `bash skills/setup.sh` builds an
+editable `.venv` and registers `.venv/bin/gospelo-mediakit-mcp`. Either way,
+re-open the Codex session afterwards. Requires `ffmpeg` (and optionally
+`ffprobe`) — set `GOSPELO_MEDIAKIT_FFMPEG` in the server's env if it is not on PATH.
 
 ## Steps
 
@@ -99,13 +99,11 @@ progress during a sequential batch.
 The same logic is a plain CLI, so a shell/CI step can call it directly:
 
 ```bash
-<repo>/mcp-server/gospelo-mediakit/venv/bin/gospelo-mediakit-mcp cli \
-  mediakit_extract_frames --json '{"video_path":"/path/clip.mp4","overwrite":true}'
-# or, if the core package is installed:
-gospelo-mediakit extract-frames /path/clip.mp4 --overwrite
+uvx --from gospelo-mediakit-mcp gospelo-mediakit extract-frames /path/clip.mp4 --overwrite
+# or, if the package is installed: gospelo-mediakit extract-frames /path/clip.mp4 --overwrite
 ```
 
 ## See also
 
-- [mcp-server/gospelo-mediakit/README.md](../../../mcp-server/gospelo-mediakit/README.md)
+- [README.md](../../../README.md) — package overview, install, publishing
 - [skills/claude/gospelo-mediakit/skill.md](../../claude/gospelo-mediakit/skill.md) — Claude Code flavour

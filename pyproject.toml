@@ -3,20 +3,27 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "gospelo-mediakit"
+# Distribution name is "gospelo-mediakit-mcp" so that `uvx gospelo-mediakit-mcp`
+# works directly (no --from). The same distribution also ships the CLI script
+# `gospelo-mediakit`. The importable package is `gospelo_mediakit`.
+name = "gospelo-mediakit-mcp"
 version = "0.1.0"
 description = "Handy tools for video-production work, bundled as an MCP server and CLI (first/last frame extraction, speed change). Works with Claude Code, Claude Desktop and Codex."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "gospelo" }]
-keywords = ["video", "ffmpeg", "frame-extraction", "mcp", "claude", "codex"]
-# Pure subprocess over the ffmpeg/ffprobe binaries — no Python media deps.
-dependencies = []
+keywords = ["video", "ffmpeg", "frame-extraction", "mcp", "claude", "codex", "model-context-protocol"]
+# Logic shells out to the ffmpeg/ffprobe binaries (no Python media deps); the
+# only runtime dependency is the MCP server framework.
+dependencies = [
+    "fastmcp>=0.4.0",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -25,16 +32,23 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["ruff>=0.5.0", "pytest>=8.0"]
+dev = ["ruff>=0.5.0", "pytest>=8.0", "build", "twine"]
 
 [project.scripts]
+# MCP stdio server — `uvx gospelo-mediakit-mcp`.
+gospelo-mediakit-mcp = "gospelo_mediakit.mcp_server:main"
+# CLI (host-free) — `gospelo-mediakit extract-frames …`.
 gospelo-mediakit = "gospelo_mediakit.cli:main"
 
 [project.urls]
 Repository = "https://github.com/gospelo-dev/mediakit"
+Homepage = "https://github.com/gospelo-dev/mediakit"
 
 [tool.hatch.build.targets.wheel]
 packages = ["gospelo_mediakit"]
+
+[tool.hatch.build.targets.sdist]
+include = ["gospelo_mediakit/", "README.md", "README_jp.md", "LICENSE.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

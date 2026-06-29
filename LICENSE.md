@@ -19,3 +19,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+## Third-party dependency: FFmpeg
+
+This software does NOT bundle or distribute FFmpeg. At runtime it invokes the
+separately-installed `ffmpeg` / `ffprobe` executables as external subprocesses;
+the user is responsible for installing FFmpeg and complying with its license.
+
+FFmpeg is a separate project licensed under the GNU Lesser General Public
+License (LGPL) version 2.1 or later, with some optional components under the GNU
+General Public License (GPL). Depending on how your FFmpeg build was compiled and
+configured, additional license terms may apply to that binary. FFmpeg is a
+trademark of Fabrice Bellard. See https://ffmpeg.org/legal.html for details.
+
+The MIT license above applies only to the gospelo-mediakit source code in this
+repository, not to FFmpeg.

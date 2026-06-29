@@ -52,22 +52,52 @@ Supported hosts (all registered by `bash skills/setup.sh`):
 - **Core** `gospelo_mediakit/core/` — deterministic Python over ffmpeg (no LLM).
 - **CLI** `gospelo-mediakit extract-frames …` — a thin wrapper over the core, for
   CI / shell use.
-- **MCP server** `mcp-server/gospelo-mediakit/` — a ~20-line FastMCP wrapper.
-  **Claude Code and Codex share the same binary.**
+- **MCP server** `gospelo_mediakit/mcp_server.py` — a ~20-line FastMCP wrapper.
+  Both console scripts ship in one distribution (`gospelo-mediakit-mcp`).
 
 ## Setup
+
+The package ships as one distribution, **`gospelo-mediakit-mcp`**, that provides
+both the MCP server and the CLI. Requirements: `ffmpeg` on the system (and
+[uv](https://docs.astral.sh/uv/) for the zero-install path below). `ffprobe` is
+optional.
+
+### Recommended: zero-install via `uvx` (cross-platform)
+
+Point each host's MCP config at `uvx gospelo-mediakit-mcp` — `uv` fetches the
+package (and a suitable Python) on demand, so there is no clone, no venv, and no
+machine-specific path. The same config works on macOS, Linux and Windows:
+
+```jsonc
+// Claude Code .mcp.json / Claude Desktop claude_desktop_config.json
+{
+  "mcpServers": {
+    "gospelo-mediakit": { "command": "uvx", "args": ["gospelo-mediakit-mcp"] }
+  }
+}
+```
+
+```bash
+# Codex (CLI + App)
+codex mcp add gospelo-mediakit -- uvx gospelo-mediakit-mcp
+```
+
+> First launch downloads the package; if a host times out spawning the server,
+> pre-warm it once with `uv tool install gospelo-mediakit-mcp` (persistent) or
+> just retry. Add an `env` block to point at ffmpeg — see below.
+
+### Local development (macOS / Linux)
+
+To hack on this repo, build an editable `.venv` and register it everywhere:
 
 ```bash
 bash skills/setup.sh
 ```
 
-This builds the venv, registers the server with all four hosts (Claude Code's
-`.mcp.json`, Claude Desktop, Codex CLI, Codex App), and symlinks the Claude
-skill into `.claude/skills`. Requirements: Python 3.11+ and `ffmpeg` on the
-system (`ffprobe` optional).
-
-Reopen the session/app afterwards (**fully restart** the GUI apps) and the
-tools become available in every host.
+It runs `pip install -e .`, registers `.venv/bin/gospelo-mediakit-mcp` with all
+four hosts, and symlinks the Claude skill. Reopen the session/app afterwards
+(**fully restart** the GUI apps). On Windows, use the `uvx` config above instead
+(this script is bash-only).
 
 ### Pointing at ffmpeg (Windows / GUI apps)
 
@@ -128,9 +158,8 @@ gospelo-mediakit change-speed clip.mp4 --speed 200           # 2x faster (shorte
 gospelo-mediakit change-speed clip.mp4 --speed 50            # half speed (longer)
 gospelo-mediakit change-speed clip.mp4 --target-duration 1 --fps 24
 
-# Via the venv (after setup, even without a global install):
-mcp-server/gospelo-mediakit/venv/bin/gospelo-mediakit-mcp cli \
-  mediakit_change_speed --json '{"video_path":"clip.mp4","target_duration":1,"overwrite":true}'
+# One-shot, no install, via uvx (the CLI script lives in the same distribution):
+uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-duration 1
 ```
 
 ## Tools
@@ -180,9 +209,10 @@ Both tools return enough information to explain and reproduce what they did:
 ```
 mediakit/
 ├── README.md / README_jp.md
-├── pyproject.toml                      # core gospelo-mediakit package
-├── gospelo_mediakit/
-│   ├── cli.py                          # subcommand dispatcher
+├── pyproject.toml                      # one distribution: gospelo-mediakit-mcp
+├── gospelo_mediakit/                   # the importable package
+│   ├── cli.py                          # CLI subcommand dispatcher
+│   ├── mcp_server.py                   # FastMCP thin wrapper + cli mode
 │   ├── core/                           # ★ the logic (ffmpeg wrappers)
 │   │   ├── frames.py                   #   extract_endframes
 │   │   ├── speed.py                    #   change_speed
@@ -191,12 +221,8 @@ mediakit/
 │   └── tools/
 │       ├── extract_frames.py           # thin CLI wrapper
 │       └── change_speed.py             # thin CLI wrapper
-├── mcp-server/gospelo-mediakit/
-│   ├── setup_venv.sh
-│   ├── pyproject.toml                  # fastmcp + core path dependency
-│   └── src/gospelo_mediakit_mcp/server.py   # FastMCP thin wrapper + cli mode
 ├── skills/
-│   ├── setup.sh                        # venv + .mcp.json + codex + symlink
+│   ├── setup.sh                        # local-dev: .venv + register all hosts
 │   ├── claude/gospelo-mediakit/skill.md
 │   └── codex/gospelo-mediakit/SKILL.md
 └── tests/
@@ -207,9 +233,16 @@ mediakit/
 1. Write the logic in `gospelo_mediakit/core/<feature>.py` (ffmpeg via subprocess).
 2. Add a thin `gospelo_mediakit/tools/<feature>.py` (argparse → core → JSON).
 3. Add one line to `_SUBCOMMANDS` in `cli.py`.
-4. Add a ~20-line `@mcp.tool()` in `mcp-server/.../server.py` (just calls the core).
+4. Add a ~20-line `@mcp.tool()` in `gospelo_mediakit/mcp_server.py` (just calls the core).
 
-`skills/setup.sh` scans `mcp-server/*`, so re-running it registers any new server.
+## Publishing (maintainers)
+
+```bash
+python -m build           # or: uv build  → dist/gospelo_mediakit_mcp-*.whl + .tar.gz
+twine upload dist/*       # or: uv publish
+```
+
+After release, end users need nothing but `uvx gospelo-mediakit-mcp` in their MCP config.
 
 ## License
 

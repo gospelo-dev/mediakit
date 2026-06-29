@@ -48,21 +48,49 @@
 
 - **コア** `gospelo_mediakit/core/` — ffmpeg を叩く決定論的 Python(LLM 不使用)。
 - **CLI** `gospelo-mediakit extract-frames …` — core の薄い wrapper。CI / シェル用。
-- **MCP サーバ** `mcp-server/gospelo-mediakit/` — FastMCP の ~20 行 wrapper。
-  **Claude Code と Codex が同じバイナリを共有**。
+- **MCP サーバ** `gospelo_mediakit/mcp_server.py` — FastMCP の ~20 行 wrapper。
+  CLI と MCP の 2 つの実行コマンドが**単一配布物 `gospelo-mediakit-mcp`** に同梱。
 
 ## セットアップ
+
+配布物は **`gospelo-mediakit-mcp`** 1 つで、MCP サーバと CLI の両方を含む。
+前提: システムの `ffmpeg`(任意で `ffprobe`)。下記 uvx 方式には [uv](https://docs.astral.sh/uv/) が必要。
+
+### 推奨: `uvx` でゼロインストール(全OS共通)
+
+各ホストの MCP 設定を `uvx gospelo-mediakit-mcp` に向けるだけ。`uv` が必要時に
+パッケージ(と適切な Python)を取得するので、clone も venv も絶対パスも不要。
+**同じ設定が macOS / Linux / Windows で動く**:
+
+```jsonc
+// Claude Code .mcp.json / Claude Desktop claude_desktop_config.json
+{
+  "mcpServers": {
+    "gospelo-mediakit": { "command": "uvx", "args": ["gospelo-mediakit-mcp"] }
+  }
+}
+```
+
+```bash
+# Codex (CLI + App)
+codex mcp add gospelo-mediakit -- uvx gospelo-mediakit-mcp
+```
+
+> 初回起動でパッケージを取得する。ホストが spawn タイムアウトする場合は
+> `uv tool install gospelo-mediakit-mcp`(常駐インストール)で事前取得するか再試行。
+> ffmpeg のパスは下記の `env` ブロックで指定する。
+
+### ローカル開発(macOS / Linux)
+
+本リポジトリを改造する場合は、editable な `.venv` を作って全ホストに登録:
 
 ```bash
 bash skills/setup.sh
 ```
 
-これで venv ビルド + 4 ホスト全てへの登録(Claude Code の `.mcp.json` / Claude Desktop /
-Codex CLI / Codex App)+ `.claude/skills` への symlink を一括実行する。
-前提: Python 3.11+ とシステムの `ffmpeg`(任意で `ffprobe`)。
-
-セッション/アプリを開き直す(GUI アプリは**完全に再起動**)と、各ホストで
-`mediakit_extract_frames` ツールが使える。
+`pip install -e .` を実行し、`.venv/bin/gospelo-mediakit-mcp` を 4 ホストに登録、
+Claude スキルを symlink する。実行後はセッション/アプリを開き直す(GUI は**完全再起動**)。
+Windows では上記 uvx 設定を使う(本スクリプトは bash 専用)。
 
 ### ffmpeg のパス指定(Windows / GUI アプリ)
 
@@ -122,9 +150,8 @@ gospelo-mediakit change-speed clip.mp4 --speed 200           # 2倍速(短く), 
 gospelo-mediakit change-speed clip.mp4 --speed 50            # 半分の速度(長く)
 gospelo-mediakit change-speed clip.mp4 --target-duration 1 --fps 24
 
-# venv 経由(setup 後、グローバル install なしでも):
-mcp-server/gospelo-mediakit/venv/bin/gospelo-mediakit-mcp cli \
-  mediakit_change_speed --json '{"video_path":"clip.mp4","target_duration":1,"overwrite":true}'
+# uvx で一発実行(インストール不要。CLI は同じ配布物に同梱):
+uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-duration 1
 ```
 
 ## ツール一覧
@@ -171,10 +198,11 @@ mcp-server/gospelo-mediakit/venv/bin/gospelo-mediakit-mcp cli \
 
 ```
 mediakit/
-├── README.md
-├── pyproject.toml                      # コア gospelo-mediakit
-├── gospelo_mediakit/
-│   ├── cli.py                          # サブコマンドディスパッチャ
+├── README.md / README_jp.md
+├── pyproject.toml                      # 単一配布物: gospelo-mediakit-mcp
+├── gospelo_mediakit/                   # import するパッケージ
+│   ├── cli.py                          # CLI サブコマンドディスパッチャ
+│   ├── mcp_server.py                   # FastMCP 薄wrapper + cli モード
 │   ├── core/                           # ★ ロジック本体(ffmpeg ラッパー)
 │   │   ├── frames.py                   #   extract_endframes
 │   │   ├── speed.py                    #   change_speed
@@ -183,12 +211,8 @@ mediakit/
 │   └── tools/
 │       ├── extract_frames.py           # CLI 薄wrapper
 │       └── change_speed.py             # CLI 薄wrapper
-├── mcp-server/gospelo-mediakit/
-│   ├── setup_venv.sh
-│   ├── pyproject.toml                  # fastmcp + core path 依存
-│   └── src/gospelo_mediakit_mcp/server.py   # FastMCP 薄wrapper + cli モード
 ├── skills/
-│   ├── setup.sh                        # venv + .mcp.json + codex + symlink
+│   ├── setup.sh                        # ローカル開発: .venv + 全ホスト登録
 │   ├── claude/gospelo-mediakit/skill.md
 │   └── codex/gospelo-mediakit/SKILL.md
 └── tests/
@@ -199,9 +223,16 @@ mediakit/
 1. `gospelo_mediakit/core/<feature>.py` にロジックを書く(ffmpeg 等を subprocess)。
 2. `gospelo_mediakit/tools/<feature>.py` に argparse → core → JSON の薄 wrapper。
 3. `cli.py` の `_SUBCOMMANDS` に 1 行追加。
-4. `mcp-server/.../server.py` に `@mcp.tool()` を ~20 行追加(core を呼ぶだけ)。
+4. `gospelo_mediakit/mcp_server.py` に `@mcp.tool()` を ~20 行追加(core を呼ぶだけ)。
 
-`skills/setup.sh` は `mcp-server/*` を総なめするので、サーバを増やす場合も再実行で登録される。
+## 公開(メンテナ向け)
+
+```bash
+python -m build           # または uv build  → dist/gospelo_mediakit_mcp-*.whl + .tar.gz
+twine upload dist/*       # または uv publish
+```
+
+公開後、利用者は MCP 設定に `uvx gospelo-mediakit-mcp` を書くだけでよい。
 
 ## ライセンス
 
