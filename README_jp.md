@@ -64,6 +64,42 @@ Codex CLI / Codex App)+ `.claude/skills` への symlink を一括実行する。
 セッション/アプリを開き直す(GUI アプリは**完全に再起動**)と、各ホストで
 `mediakit_extract_frames` ツールが使える。
 
+### ffmpeg のパス指定(Windows / GUI アプリ)
+
+GUI ホスト(Claude Desktop / Codex App)はシェルの PATH を継承しないため、
+**環境変数 `GOSPELO_MEDIAKIT_FFMPEG` を MCP 設定の `env` ブロックに書くのが最も確実**。
+値は ffmpeg 実行ファイル**または** `bin` ディレクトリのどちらでも可。
+(`GOSPELO_MEDIAKIT_FFPROBE` も同様。任意。)
+
+Claude Code / Claude Desktop(`.mcp.json` / `claude_desktop_config.json`):
+
+```jsonc
+{
+  "mcpServers": {
+    "gospelo-mediakit": {
+      "command": "uvx",
+      "args": ["gospelo-mediakit-mcp"],
+      "env": {
+        // Windows — ffmpeg.exe のパス、または bin ディレクトリ:
+        "GOSPELO_MEDIAKIT_FFMPEG": "C:\\ffmpeg\\bin\\ffmpeg.exe"
+        // macOS/Linux の例: "/opt/homebrew/bin/ffmpeg"
+      }
+    }
+  }
+}
+```
+
+Codex(`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.gospelo-mediakit.env]
+GOSPELO_MEDIAKIT_FFMPEG = "C:\\ffmpeg\\bin"   # ファイル or bin ディレクトリ
+```
+
+未指定でも `PATH` と定番ディレクトリ(macOS `/opt/homebrew/bin` 等、Windows
+`C:\ffmpeg\bin` / `%ProgramFiles%\ffmpeg\bin` / scoop shims)を自動探索する。
+ffmpeg の導入は `winget install ffmpeg`(Windows)/ `brew install ffmpeg`(macOS)。
+
 ## 使い方
 
 ### Claude Code / Claude Desktop / Codex(MCP ツール)

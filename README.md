@@ -69,6 +69,43 @@ system (`ffprobe` optional).
 Reopen the session/app afterwards (**fully restart** the GUI apps) and the
 tools become available in every host.
 
+### Pointing at ffmpeg (Windows / GUI apps)
+
+GUI hosts (Claude Desktop, Codex App) don't inherit your shell `PATH`, so the
+most reliable way to locate ffmpeg is the **`GOSPELO_MEDIAKIT_FFMPEG`** env var,
+set in the MCP server's `env` block. It accepts the ffmpeg executable **or** its
+`bin` directory. (`GOSPELO_MEDIAKIT_FFPROBE` is the same for ffprobe; optional.)
+
+Claude Code / Claude Desktop (`.mcp.json` / `claude_desktop_config.json`):
+
+```jsonc
+{
+  "mcpServers": {
+    "gospelo-mediakit": {
+      "command": "uvx",
+      "args": ["gospelo-mediakit-mcp"],
+      "env": {
+        // Windows — the ffmpeg.exe path or its bin dir:
+        "GOSPELO_MEDIAKIT_FFMPEG": "C:\\ffmpeg\\bin\\ffmpeg.exe"
+        // macOS/Linux example: "/opt/homebrew/bin/ffmpeg"
+      }
+    }
+  }
+}
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.gospelo-mediakit.env]
+GOSPELO_MEDIAKIT_FFMPEG = "C:\\ffmpeg\\bin"   # file or bin directory
+```
+
+Without the override the server still auto-searches `PATH` and the usual install
+locations (macOS `/opt/homebrew/bin` etc.; Windows `C:\ffmpeg\bin`,
+`%ProgramFiles%\ffmpeg\bin`, scoop shims). Install ffmpeg with
+`winget install ffmpeg` (Windows) or `brew install ffmpeg` (macOS).
+
 ## Usage
 
 ### Claude Code / Claude Desktop / Codex (MCP tools)

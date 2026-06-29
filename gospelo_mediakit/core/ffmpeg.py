@@ -21,24 +21,64 @@ from .errors import MediakitError
 
 # GUI hosts (Claude Desktop, Codex App) spawn this server WITHOUT the user's
 # shell PATH, so a plain ``shutil.which("ffmpeg")`` returns None even when
-# ffmpeg is installed (commonly under Homebrew's /opt/homebrew/bin). We look in
-# the standard install locations and honour explicit env overrides so the tool
-# works the same whether launched from a terminal or a GUI app.
-_COMMON_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
+# ffmpeg is installed. We honour an explicit env override first (the supported
+# way to point the MCP config at a specific binary), then PATH, then the usual
+# per-OS install locations. Works the same from a terminal or a GUI app, on
+# macOS / Linux / Windows.
+_IS_WINDOWS = os.name == "nt"
+
+# POSIX (macOS / Linux) standard locations.
+_POSIX_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
+
+
+def _windows_bin_dirs() -> list[str]:
+    """Common off-PATH ffmpeg locations on Windows (manual / winget / scoop)."""
+    dirs = [r"C:\ffmpeg\bin"]
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env_name)
+        if base:
+            dirs.append(os.path.join(base, "ffmpeg", "bin"))
+    user = os.environ.get("USERPROFILE")
+    if user:
+        dirs.append(os.path.join(user, "scoop", "shims"))  # scoop
+    return dirs
+
+
+def _common_bin_dirs() -> list[str]:
+    return _windows_bin_dirs() if _IS_WINDOWS else list(_POSIX_BIN_DIRS)
+
+
+def _candidate_names(name: str) -> list[str]:
+    """On Windows look for ``name.exe`` (and bare name) too."""
+    return [f"{name}.exe", name] if _IS_WINDOWS else [name]
+
+
+def _resolve_override(override: str, name: str) -> str | None:
+    """Resolve an env override that may be a file OR a directory holding the binary."""
+    p = Path(override)
+    if p.is_file():
+        return str(p)
+    if p.is_dir():  # tolerate pointing at the bin directory rather than the exe
+        for cand in _candidate_names(name):
+            f = p / cand
+            if f.is_file():
+                return str(f)
+    return None
 
 
 def _find_binary(name: str, env_var: str) -> str | None:
     """Locate ``name``: explicit env override, then PATH, then common dirs."""
-    override = os.environ.get(env_var, "").strip()
+    override = os.environ.get(env_var, "").strip().strip('"')
     if override:
-        return override if Path(override).is_file() else None
-    found = shutil.which(name)
+        return _resolve_override(override, name)
+    found = shutil.which(name)  # honours PATHEXT (.exe) on Windows
     if found:
         return found
-    for directory in _COMMON_BIN_DIRS:
-        candidate = Path(directory) / name
-        if candidate.is_file():
-            return str(candidate)
+    for directory in _common_bin_dirs():
+        for cand in _candidate_names(name):
+            candidate = Path(directory) / cand
+            if candidate.is_file():
+                return str(candidate)
     return None
 
 
@@ -57,10 +97,14 @@ def require_ffmpeg() -> str:
     path = find_ffmpeg()
     if not path:
         raise MediakitError(
-            "ffmpeg not found. Install it (macOS: `brew install ffmpeg`), or set "
-            "GOSPELO_MEDIAKIT_FFMPEG to its absolute path. "
-            "(GUI apps like Claude Desktop / Codex App do not inherit your shell "
-            "PATH; this server already checks /opt/homebrew/bin and /usr/local/bin.)"
+            "ffmpeg not found. Set GOSPELO_MEDIAKIT_FFMPEG to the ffmpeg path "
+            "(or its bin directory) in the MCP server's env, or install ffmpeg "
+            "(macOS: `brew install ffmpeg`; Windows: `winget install ffmpeg`). "
+            "GUI apps (Claude Desktop / Codex App) do not inherit your shell PATH, "
+            "so setting GOSPELO_MEDIAKIT_FFMPEG in the MCP config is the reliable fix. "
+            "Auto-checked locations: PATH, "
+            + (", ".join(_common_bin_dirs()))
+            + "."
         )
     return path
 

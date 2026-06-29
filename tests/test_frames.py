@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,22 @@ from gospelo_mediakit.core.frames import extract_endframes
 pytestmark = pytest.mark.skipif(
     shutil.which("ffmpeg") is None, reason="ffmpeg not installed"
 )
+
+
+def test_ffmpeg_env_override_file_and_dir(tmp_path, monkeypatch):
+    """GOSPELO_MEDIAKIT_FFMPEG honours both a file path and a bin directory."""
+    from gospelo_mediakit.core import ffmpeg as ff
+
+    real = shutil.which("ffmpeg")
+    # Pointing at the executable file resolves to that file.
+    monkeypatch.setenv("GOSPELO_MEDIAKIT_FFMPEG", real)
+    assert ff.find_ffmpeg() == real
+    # Pointing at the containing directory also resolves (Windows-friendly).
+    monkeypatch.setenv("GOSPELO_MEDIAKIT_FFMPEG", str(Path(real).parent))
+    assert ff.find_ffmpeg() is not None
+    # A bogus override resolves to nothing (no silent PATH fallback).
+    monkeypatch.setenv("GOSPELO_MEDIAKIT_FFMPEG", str(tmp_path / "nope" / "ffmpeg"))
+    assert ff.find_ffmpeg() is None
 
 
 @pytest.fixture
