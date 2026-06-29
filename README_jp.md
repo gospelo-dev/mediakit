@@ -1,0 +1,172 @@
+# gospelo-mediakit
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/gospelo-dev/mediakit/blob/main/LICENSE.md) [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/) [![Powered by FFmpeg](https://img.shields.io/badge/Powered_by-FFmpeg-007808.svg?logo=ffmpeg&logoColor=white)](https://ffmpeg.org/) [![MCP](https://img.shields.io/badge/MCP-Claude_Code_%7C_Desktop_%7C_Codex-6e40c9.svg)](https://modelcontextprotocol.io/)
+
+*[English](README.md) | 日本語*
+
+映像制作で地味に使う **便利ツールを MCP でまとめた** ユーティリティ集です。
+今は動画の **最初/最後フレーム抽出** と **速度変更**(fps 維持・ピッチ不変)を収録。
+中身は ffmpeg を叩くだけの小さな処理だけですがアップデートしていきます。
+
+3 つの呼び出し口を持つが、ロジックの実体は **1 か所** (`gospelo_mediakit/core/`)
+にだけ存在する「薄いラッパー」構成:
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/gospelo-dev/mediakit/main/images/architecture.png" alt="gospelo-mediakit アーキテクチャ: 多ホスト・単一コア" width="860">
+</p>
+
+<details>
+<summary>テキスト版 (ASCII)</summary>
+
+```
+                ┌─ Claude Code   (.mcp.json, プロジェクト)        ─┐
+                │  Claude Desktop (claude_desktop_config.json)    │
+  MCP stdio  ◄──┤  Codex CLI      (~/.codex/config.toml)          │ ←─ 全ホストが
+   server    ◄──┤  Codex App      (~/.codex/config.toml ※同一)    │    同じ venv
+ (薄wrapper)    └────────────────────────────────────────────────┘    バイナリを叩く
+        │
+        ▼  import
+  gospelo_mediakit.core   ◄── CLI (gospelo-mediakit / python -m …) も同じ core を呼ぶ
+   (ffmpeg を subprocess)
+```
+
+</details>
+
+対応ホスト（`bash skills/setup.sh` が全て登録）:
+
+| ホスト | 登録先 | スコープ |
+|--------|--------|----------|
+| Claude Code | `.mcp.json`(プロジェクト) | このリポジトリ内 |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` | グローバル |
+| Codex CLI | `~/.codex/config.toml` | グローバル |
+| Codex App | `~/.codex/config.toml`(CLI と同一ファイル) | グローバル |
+
+> **GUI アプリ(Claude Desktop / Codex App)の注意**: シェルの PATH を継承しないため、
+> 本サーバは `ffmpeg`/`ffprobe` を **PATH → `/opt/homebrew/bin` 等の定番ディレクトリ →
+> 環境変数 `GOSPELO_MEDIAKIT_FFMPEG`/`GOSPELO_MEDIAKIT_FFPROBE`** の順で自動探索する。
+> setup.sh は Claude Desktop エントリに PATH も注入する。設定変更後は**アプリを完全再起動**。
+
+- **コア** `gospelo_mediakit/core/` — ffmpeg を叩く決定論的 Python(LLM 不使用)。
+- **CLI** `gospelo-mediakit extract-frames …` — core の薄い wrapper。CI / シェル用。
+- **MCP サーバ** `mcp-server/gospelo-mediakit/` — FastMCP の ~20 行 wrapper。
+  **Claude Code と Codex が同じバイナリを共有**。
+
+## セットアップ
+
+```bash
+bash skills/setup.sh
+```
+
+これで venv ビルド + 4 ホスト全てへの登録(Claude Code の `.mcp.json` / Claude Desktop /
+Codex CLI / Codex App)+ `.claude/skills` への symlink を一括実行する。
+前提: Python 3.11+ とシステムの `ffmpeg`(任意で `ffprobe`)。
+
+セッション/アプリを開き直す(GUI アプリは**完全に再起動**)と、各ホストで
+`mediakit_extract_frames` ツールが使える。
+
+## 使い方
+
+### Claude Code / Claude Desktop / Codex(MCP ツール)
+
+```
+最初と最後のフレームを clip.mp4 から抜き出して     → mediakit_extract_frames
+4秒の clip.mp4 を1秒に圧縮して(ピッチ維持)         → mediakit_change_speed
+```
+
+### CLI(ホスト不要)
+
+```bash
+# フレーム抽出
+gospelo-mediakit extract-frames clip.mp4                 # 最初+最後 → clip_first.png / clip_last.png
+gospelo-mediakit extract-frames clip.mp4 --which last --overwrite
+
+# 速度変更(フレームレート維持・ピッチ/音量不変)
+gospelo-mediakit change-speed clip.mp4 --target-duration 1   # 4s→1s, 出力 clip_1s.mp4
+gospelo-mediakit change-speed clip.mp4 --speed 200           # 2倍速(短く), clip_2x.mp4
+gospelo-mediakit change-speed clip.mp4 --speed 50            # 半分の速度(長く)
+gospelo-mediakit change-speed clip.mp4 --target-duration 1 --fps 24
+
+# venv 経由(setup 後、グローバル install なしでも):
+mcp-server/gospelo-mediakit/venv/bin/gospelo-mediakit-mcp cli \
+  mediakit_change_speed --json '{"video_path":"clip.mp4","target_duration":1,"overwrite":true}'
+```
+
+## ツール一覧
+
+### `mediakit_extract_frames` — 最初/最後フレーム抽出
+
+| Arg | Default | 説明 |
+|-----|---------|------|
+| `video_path` | (必須) | 入力動画 |
+| `out_dir` | 動画と同じ場所 | 出力先 |
+| `prefix` | 動画の stem | 出力名の接頭辞 |
+| `fmt` | `png` | 画像フォーマット |
+| `which` | `both` | `first` / `last` / `both` |
+| `overwrite` | `false` | 既存上書き |
+
+> **なぜ ffmpeg か**: 最後のフレームは OpenCV の `CAP_PROP_POS_FRAMES` seek だと
+> コーデック次第で黒画/取りこぼしが起きる。本ツールは ffmpeg `-sseof`(末尾から
+> シークして EOF まで上書き)で確実に取得する。
+
+### `mediakit_change_speed` — 速度変更(fps維持・ピッチ/音量不変)
+
+| Arg | Default | 説明 |
+|-----|---------|------|
+| `video_path` | (必須) | 入力動画 |
+| `speed` | `100` | 速度%（100=等速 / 200=2倍速で短く / 50=半分で長く） |
+| `target_duration` | なし | 出力秒数を指定（`speed` より優先・厳密に切り揃え） |
+| `fps` | 元の fps | 出力フレームレート（既定は維持。指定で変換も可） |
+| `out_dir` / `prefix` / `overwrite` | — | 抽出ツールと同じ |
+
+> **fps 維持の仕組み**: `setpts` だけだと全フレームを詰めて fps が上がる。`fps` フィルタで
+> 元の fps に戻し、**最近傍タイムスタンプで間引き(drop/duplicate、画素合成はしない)**。
+> 音声は `atempo`(テンポ変更でピッチ・音量を保持、2倍超は連鎖)。
+
+## 出力に含まれる情報(LLM 連携用)
+
+両ツールの返り値には、生成方法とフォーマットを説明・再現するための情報が入る:
+
+- `input_format` / `output_format`(または `info`) — コンテナ・コーデック・解像度・
+  fps・フレーム数・ビットレート・サイズ・音声(codec/sample_rate/channels)
+- `processing` — 適用したフィルタ列、フレーム間引き方式、フレーム数、エンコーダ、
+  **実行した ffmpeg コマンド全文**、1行サマリ
+
+## ディレクトリ構成
+
+```
+mediakit/
+├── README.md
+├── pyproject.toml                      # コア gospelo-mediakit
+├── gospelo_mediakit/
+│   ├── cli.py                          # サブコマンドディスパッチャ
+│   ├── core/                           # ★ ロジック本体(ffmpeg ラッパー)
+│   │   ├── frames.py                   #   extract_endframes
+│   │   ├── speed.py                    #   change_speed
+│   │   ├── ffmpeg.py                   #   run_ffmpeg / probe / has_audio
+│   │   └── errors.py
+│   └── tools/
+│       ├── extract_frames.py           # CLI 薄wrapper
+│       └── change_speed.py             # CLI 薄wrapper
+├── mcp-server/gospelo-mediakit/
+│   ├── setup_venv.sh
+│   ├── pyproject.toml                  # fastmcp + core path 依存
+│   └── src/gospelo_mediakit_mcp/server.py   # FastMCP 薄wrapper + cli モード
+├── skills/
+│   ├── setup.sh                        # venv + .mcp.json + codex + symlink
+│   ├── claude/gospelo-mediakit/skill.md
+│   └── codex/gospelo-mediakit/SKILL.md
+└── tests/
+```
+
+## 新しいツールを足すとき
+
+1. `gospelo_mediakit/core/<feature>.py` にロジックを書く(ffmpeg 等を subprocess)。
+2. `gospelo_mediakit/tools/<feature>.py` に argparse → core → JSON の薄 wrapper。
+3. `cli.py` の `_SUBCOMMANDS` に 1 行追加。
+4. `mcp-server/.../server.py` に `@mcp.tool()` を ~20 行追加(core を呼ぶだけ)。
+
+`skills/setup.sh` は `mcp-server/*` を総なめするので、サーバを増やす場合も再実行で登録される。
+
+## ライセンス
+
+MIT — [LICENSE.md](LICENSE.md) を参照。
