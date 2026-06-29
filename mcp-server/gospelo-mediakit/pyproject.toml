@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gospelo-mediakit-mcp"
+version = "0.1.0"
+description = "FastMCP server exposing gospelo-mediakit tools (first/last frame extraction) to Claude Code and Codex."
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=0.4.0",
+    # The core logic. setup_venv.sh installs it as an editable path dependency
+    # (pip install -e ../..), so this pinned line is a fallback for non-editable
+    # installs; the editable install wins when present.
+    "gospelo-mediakit",
+]
+
+[project.scripts]
+gospelo-mediakit-mcp = "gospelo_mediakit_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gospelo_mediakit_mcp"]
