@@ -3,6 +3,7 @@
 Exposes these tools:
   - mediakit_extract_frames
   - mediakit_change_speed
+  - mediakit_color_match
 
 Each tool is a **thin wrapper** (~20 lines) over a ``gospelo_mediakit.core``
 function, run via ``asyncio.to_thread`` so the ffmpeg subprocess never blocks
@@ -25,6 +26,7 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from gospelo_mediakit.core.color_match import color_match
 from gospelo_mediakit.core.errors import MediakitError
 from gospelo_mediakit.core.frames import extract_endframes
 from gospelo_mediakit.core.speed import change_speed
@@ -136,6 +138,57 @@ async def mediakit_change_speed(
         return {"ok": False, "error": str(exc)}
 
 
+@mcp.tool()
+async def mediakit_color_match(
+    video_path: str,
+    reference_image: str,
+    method: str = "gain",
+    strength: float = 1.0,
+    out_dir: str | None = None,
+    prefix: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Match a video's colour toward a reference image (per-channel mean match).
+
+    **Call this tool** when an AI-generated clip's colour drifted from the
+    source frame (e.g. Seedance dropping the blue channel) and you have the
+    original frame as a reference. It nudges the whole video's colour back
+    toward the reference. Dependency-free (ffmpeg only).
+
+    Args:
+        video_path: The colour-shifted / generated video.
+        reference_image: Image whose colour is the target (e.g. the original frame).
+        method: ``"gain"`` (multiplicative, default; best for the typical blue
+            drop) or ``"offset"`` (additive).
+        strength: 0..1 blend of the correction with identity (1.0 = full).
+        out_dir: Output directory. Defaults to the video's directory.
+        prefix: Output basename prefix. Defaults to the video's stem, producing
+            ``<stem>_colormatched.<ext>``.
+        overwrite: Overwrite an existing output. Default False.
+
+    Returns:
+        On success: ``{"ok": true, "input", "output", "reference", "method",
+        "strength", "reference_mean", "video_mean", "correction",
+        "input_format", "output_format", "processing"}``. A single global
+        correction matches the video's average colour to the reference's;
+        per-time drift is not corrected.
+        On failure: ``{"ok": false, "error": "<message>"}``.
+    """
+    try:
+        return await asyncio.to_thread(
+            color_match,
+            video_path=video_path,
+            reference_image=reference_image,
+            method=method,  # type: ignore[arg-type]
+            strength=strength,
+            out_dir=out_dir,
+            prefix=prefix,
+            overwrite=overwrite,
+        )
+    except MediakitError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def _run_cli() -> int:
     """Run a single tool from the command line (one-shot).
 
@@ -150,7 +203,10 @@ def _run_cli() -> int:
     import sys
 
     parser = argparse.ArgumentParser(prog="gospelo-mediakit-mcp cli")
-    parser.add_argument("tool", choices=["mediakit_extract_frames", "mediakit_change_speed"])
+    parser.add_argument(
+        "tool",
+        choices=["mediakit_extract_frames", "mediakit_change_speed", "mediakit_color_match"],
+    )
     parser.add_argument("--json", default="{}", help="JSON-encoded argument map for the tool.")
     args = parser.parse_args(sys.argv[2:])
 
@@ -161,7 +217,17 @@ def _run_cli() -> int:
         return 2
 
     try:
-        if args.tool == "mediakit_change_speed":
+        if args.tool == "mediakit_color_match":
+            result = color_match(
+                video_path=kwargs.get("video_path", ""),
+                reference_image=kwargs.get("reference_image", ""),
+                method=kwargs.get("method", "gain"),
+                strength=float(kwargs.get("strength", 1.0)),
+                out_dir=kwargs.get("out_dir"),
+                prefix=kwargs.get("prefix"),
+                overwrite=bool(kwargs.get("overwrite", False)),
+            )
+        elif args.tool == "mediakit_change_speed":
             result = change_speed(
                 video_path=kwargs.get("video_path", ""),
                 speed=float(kwargs.get("speed", 100.0)),

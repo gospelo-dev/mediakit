@@ -10,6 +10,7 @@ Subcommands map 1:1 to the tools in ``gospelo_mediakit.tools``:
 
     extract-frames    extract_frames.py   (first/last frame -> image files)
     change-speed      change_speed.py     (re-time video; keep fps + pitch)
+    color-match       color_match.py      (match colour toward a reference image)
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from . import __version__
 _SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "extract-frames": ("gospelo_mediakit.tools.extract_frames", "main"),
     "change-speed": ("gospelo_mediakit.tools.change_speed", "main"),
+    "color-match": ("gospelo_mediakit.tools.color_match", "main"),
 }
 
 

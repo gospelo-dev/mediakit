@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 # works directly (no --from). The same distribution also ships the CLI script
 # `gospelo-mediakit`. The importable package is `gospelo_mediakit`.
 name = "gospelo-mediakit-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Handy tools for video-production work, bundled as an MCP server and CLI (first/last frame extraction, speed change). Works with Claude Code, Claude Desktop and Codex."
 readme = "README.md"
 license = "MIT"
@@ -18,6 +18,7 @@ keywords = ["video", "ffmpeg", "frame-extraction", "mcp", "claude", "codex", "mo
 # only runtime dependency is the MCP server framework.
 dependencies = [
     "fastmcp>=0.4.0",
+    "websockets>=14.0",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -39,6 +40,8 @@ dev = ["ruff>=0.5.0", "pytest>=8.0", "build", "twine"]
 gospelo-mediakit-mcp = "gospelo_mediakit.mcp_server:main"
 # CLI (host-free) — `gospelo-mediakit extract-frames …`.
 gospelo-mediakit = "gospelo_mediakit.cli:main"
+# Premiere Pro UXP bridge MCP server (separate from the ffmpeg utilities).
+gospelo-premiere-mcp = "gospelo_mediakit.premiere_mcp_server:main"
 
 [project.urls]
 Repository = "https://github.com/gospelo-dev/mediakit"
