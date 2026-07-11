@@ -5,7 +5,8 @@
 *[English](README.md) | 日本語*
 
 映像制作で地味に使う **便利ツールを MCP でまとめた** ユーティリティ集です。
-今は動画の **最初/最後フレーム抽出** と **速度変更**(fps 維持・ピッチ不変)を収録。
+今は動画の **最初/最後フレーム抽出**、**速度変更**(fps 維持・ピッチ不変)、
+**色味補正**(AI 生成の色ズレを参照画像に合わせる)を収録。
 中身は ffmpeg を叩くだけの小さな処理だけですがアップデートしていきます。
 
 3 つの呼び出し口を持つが、ロジックの実体は **1 か所** (`gospelo_mediakit/core/`)
@@ -150,6 +151,9 @@ gospelo-mediakit change-speed clip.mp4 --speed 200           # 2倍速(短く), 
 gospelo-mediakit change-speed clip.mp4 --speed 50            # 半分の速度(長く)
 gospelo-mediakit change-speed clip.mp4 --target-duration 1 --fps 24
 
+# 色味補正(生成動画を元フレームの色に合わせる。AI の色ズレ対策)
+gospelo-mediakit color-match generated.mp4 --reference original_frame.png
+
 # uvx で一発実行(インストール不要。CLI は同じ配布物に同梱):
 uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-duration 1
 ```
@@ -185,6 +189,21 @@ uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-
 > 元の fps に戻し、**最近傍タイムスタンプで間引き(drop/duplicate、画素合成はしない)**。
 > 音声は `atempo`(テンポ変更でピッチ・音量を保持、2倍超は連鎖)。
 
+### `mediakit_color_match` — 参照画像に色味を合わせる
+
+| Arg | Default | 説明 |
+|-----|---------|------|
+| `video_path` | (必須) | 色ズレした/生成された動画 |
+| `reference_image` | (必須) | 目標の色を持つ画像(元フレーム等) |
+| `method` | `gain` | `gain`(乗算) / `offset`(加算) |
+| `strength` | `1.0` | 補正の強さ 0..1(1.0=フル) |
+| `out_dir` / `prefix` / `overwrite` | — | 他ツールと同じ |
+
+> **用途**: Seedance 等の AI 生成は元フレームから色がズレやすく(特に青が落ちる)。
+> 参照画像と動画のチャンネル平均(ffmpeg `scale=1:1` の面積平均)を比べ、per-channel の
+> `gain`/`offset` を全体に適用して戻す。**依存追加なし**。全体一律の補正なので、
+> 時間方向のドリフト(先頭と末尾でズレ量が違う場合)は補正しない。
+
 ## 出力に含まれる情報(LLM 連携用)
 
 両ツールの返り値には、生成方法とフォーマットを説明・再現するための情報が入る:
@@ -206,11 +225,13 @@ mediakit/
 │   ├── core/                           # ★ ロジック本体(ffmpeg ラッパー)
 │   │   ├── frames.py                   #   extract_endframes
 │   │   ├── speed.py                    #   change_speed
+│   │   ├── color_match.py              #   color_match
 │   │   ├── ffmpeg.py                   #   run_ffmpeg / probe / has_audio
 │   │   └── errors.py
 │   └── tools/
 │       ├── extract_frames.py           # CLI 薄wrapper
-│       └── change_speed.py             # CLI 薄wrapper
+│       ├── change_speed.py             # CLI 薄wrapper
+│       └── color_match.py              # CLI 薄wrapper
 ├── skills/
 │   ├── setup.sh                        # ローカル開発: .venv + 全ホスト登録
 │   ├── claude/gospelo-mediakit/skill.md

@@ -5,9 +5,10 @@
 *English | [日本語](README_jp.md)*
 
 **Handy little tools for video-production work, bundled as an MCP server.**
-Today it offers **first/last frame extraction** and **speed change** (e.g.
-compress a 4-second clip to 1 second). Under the hood it just shells out to
-ffmpeg — small for now, but it'll keep growing.
+Today it offers **first/last frame extraction**, **speed change** (e.g.
+compress a 4-second clip to 1 second), and **colour matching** (nudge an
+AI-generated clip's colour back toward a reference frame). Under the hood it
+just shells out to ffmpeg — small for now, but it'll keep growing.
 
 It has three entry points, but the actual logic lives in **one place**
 (`gospelo_mediakit/core/`) — a thin-wrapper design:
@@ -158,6 +159,9 @@ gospelo-mediakit change-speed clip.mp4 --speed 200           # 2x faster (shorte
 gospelo-mediakit change-speed clip.mp4 --speed 50            # half speed (longer)
 gospelo-mediakit change-speed clip.mp4 --target-duration 1 --fps 24
 
+# Colour match a generated clip toward the original frame (fixes AI colour drift)
+gospelo-mediakit color-match generated.mp4 --reference original_frame.png
+
 # One-shot, no install, via uvx (the CLI script lives in the same distribution):
 uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-duration 1
 ```
@@ -195,6 +199,22 @@ uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-
 > rate by **nearest-timestamp drop/duplicate (no pixel blending)**. Audio uses
 > `atempo` (a tempo change that preserves pitch and volume; chained beyond 2x).
 
+### `mediakit_color_match` — match colour toward a reference image
+
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `video_path` | (required) | The colour-shifted / generated video |
+| `reference_image` | (required) | Image whose colour is the target (e.g. the original frame) |
+| `method` | `gain` | `gain` (multiplicative) or `offset` (additive) |
+| `strength` | `1.0` | 0..1 blend of the correction with identity |
+| `out_dir` / `prefix` / `overwrite` | — | Same as the other tools |
+
+> **Why:** AI video generators (e.g. Seedance) drift colour from the source frame
+> — commonly dropping the blue channel. This measures the per-channel average of
+> the reference image vs the video (ffmpeg `scale=1:1` area-average) and applies a
+> per-channel `gain`/`offset` across the whole clip. Dependency-free. It is a
+> single global correction (matches the average); per-time drift is not corrected.
+
 ## Output details (for LLM integration)
 
 Both tools return enough information to explain and reproduce what they did:
@@ -216,11 +236,13 @@ mediakit/
 │   ├── core/                           # ★ the logic (ffmpeg wrappers)
 │   │   ├── frames.py                   #   extract_endframes
 │   │   ├── speed.py                    #   change_speed
+│   │   ├── color_match.py              #   color_match
 │   │   ├── ffmpeg.py                   #   run_ffmpeg / probe / has_audio
 │   │   └── errors.py
 │   └── tools/
 │       ├── extract_frames.py           # thin CLI wrapper
-│       └── change_speed.py             # thin CLI wrapper
+│       ├── change_speed.py             # thin CLI wrapper
+│       └── color_match.py              # thin CLI wrapper
 ├── skills/
 │   ├── setup.sh                        # local-dev: .venv + register all hosts
 │   ├── claude/gospelo-mediakit/skill.md
