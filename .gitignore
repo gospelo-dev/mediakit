@@ -9,6 +9,7 @@ build/
 .eggs/
 *.egg
 .venv/
+.premiere-bridge-tls/
 venv/
 .pytest_cache/
 .ruff_cache/

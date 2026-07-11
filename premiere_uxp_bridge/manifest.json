@@ -1,0 +1,35 @@
+{
+  "manifestVersion": 5,
+  "id": "com.gospelo.premiere-mcp-bridge",
+  "name": "Gospelo Premiere Bridge",
+  "version": "0.1.0",
+  "main": "index.html",
+  "host": {
+    "app": "premierepro",
+    "minVersion": "25.6.0"
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "gospelo-premiere-bridge-panel",
+      "label": {
+        "default": "Gospelo Premiere Bridge"
+      },
+      "minimumSize": {
+        "width": 280,
+        "height": 220
+      },
+      "preferredDockedSize": {
+        "width": 320,
+        "height": 250
+      }
+    }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": [
+        "wss://127.0.0.1:47653"
+      ]
+    }
+  }
+}

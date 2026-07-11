@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Gospelo Premiere Bridge</title>
+    <style>
+      body { color: #e8e8e8; font: 13px/1.4 sans-serif; margin: 16px; }
+      label { display: block; font-weight: 600; margin-top: 12px; }
+      input { box-sizing: border-box; margin-top: 4px; padding: 7px; width: 100%; }
+      button { margin-top: 16px; padding: 7px 12px; }
+      #status { color: #a8e6cf; margin-top: 12px; word-break: break-word; }
+      .note { color: #c5c5c5; font-size: 12px; margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <label for="token">Bridge token</label>
+    <input id="token" type="password" autocomplete="off" />
+    <button id="connect" type="button">Connect</button>
+    <div id="status">Waiting for a bridge token.</div>
+    <p class="note">
+      Keep this panel open while using the Python MCP server. This version
+      exposes only a read-only project-asset listing.
+    </p>
+    <script src="index.js"></script>
+  </body>
+</html>
