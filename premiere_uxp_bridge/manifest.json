@@ -27,7 +27,7 @@
   ],
   "requiredPermissions": {
     "network": {
-      "domains": "all"
+      "domains": ["wss://pr-bridge.gospelo.dev"]
     }
   }
 }

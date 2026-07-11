@@ -6,8 +6,13 @@
 const ppro = require("premierepro");
 const { entrypoints } = require("uxp");
 
-// A publicly-trusted (Let's Encrypt) hostname mapped to 127.0.0.1 via /etc/hosts,
-// because UXP does not trust self-signed / private-CA certificates.
+// UXP only trusts publicly-issued certificates (not self-signed / mkcert /
+// private-CA / macOS-keychain trust). So the panel must connect to a hostname
+// that resolves to 127.0.0.1 (via /etc/hosts) and is covered by a public-CA
+// (e.g. Let's Encrypt) certificate the Python bridge serves.
+//
+// To use your own hostname, change it BOTH here and in manifest.json's
+// requiredPermissions.network.domains (they must match). See README.md.
 const BRIDGE_URL = "wss://pr-bridge.gospelo.dev:47653";
 let socket = null;
 let reconnectTimer = null;
@@ -41,10 +46,8 @@ function connect() {
   }
 
   setStatus("Connecting to the local MCP bridge…");
-  console.error("[bridge] connect() ->", BRIDGE_URL);  // console.error so UXP APP LOGS shows it
   socket = new WebSocket(BRIDGE_URL);
   socket.onopen = () => {
-    console.error("[bridge] onopen; readyState=", socket.readyState, "; sending hello");
     socket.send(
       JSON.stringify({
         type: "hello",
@@ -77,6 +80,9 @@ function connect() {
       setStatus(`Bridge request failed: ${String(error.message || error)}`, true);
     }
   };
+  // Diagnostics use console.error because the UXP Developer Tool APP LOGS panel
+  // only surfaces Error/Warning entries. onclose's code/reason is the key signal
+  // when a TLS trust failure otherwise looks like a plain disconnect.
   socket.onerror = (event) => {
     console.error(
       "[bridge] onerror:",

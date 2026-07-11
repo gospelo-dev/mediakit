@@ -30,3 +30,6 @@ development/
 
 # Test artifacts (generated sample videos / extracted frames).
 tests/_tmp/
+
+# Scratch space for temporary files (not committed).
+scratch/
