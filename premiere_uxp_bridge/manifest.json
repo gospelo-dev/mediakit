@@ -27,9 +27,7 @@
   ],
   "requiredPermissions": {
     "network": {
-      "domains": [
-        "wss://127.0.0.1:47653"
-      ]
+      "domains": "all"
     }
   }
 }

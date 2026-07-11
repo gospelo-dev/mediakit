@@ -6,7 +6,9 @@
 const ppro = require("premierepro");
 const { entrypoints } = require("uxp");
 
-const BRIDGE_URL = "wss://127.0.0.1:47653";
+// A publicly-trusted (Let's Encrypt) hostname mapped to 127.0.0.1 via /etc/hosts,
+// because UXP does not trust self-signed / private-CA certificates.
+const BRIDGE_URL = "wss://pr-bridge.gospelo.dev:47653";
 let socket = null;
 let reconnectTimer = null;
 let currentToken = "";
@@ -39,8 +41,10 @@ function connect() {
   }
 
   setStatus("Connecting to the local MCP bridge…");
+  console.error("[bridge] connect() ->", BRIDGE_URL);  // console.error so UXP APP LOGS shows it
   socket = new WebSocket(BRIDGE_URL);
   socket.onopen = () => {
+    console.error("[bridge] onopen; readyState=", socket.readyState, "; sending hello");
     socket.send(
       JSON.stringify({
         type: "hello",
@@ -73,8 +77,19 @@ function connect() {
       setStatus(`Bridge request failed: ${String(error.message || error)}`, true);
     }
   };
-  socket.onerror = () => setStatus("Bridge connection failed. Verify the trusted TLS certificate and token.", true);
-  socket.onclose = () => {
+  socket.onerror = (event) => {
+    console.error(
+      "[bridge] onerror:",
+      (event && (event.message || event.error || event.reason || event.type)) || "no-detail",
+    );
+    setStatus("Bridge connection failed. Verify the trusted TLS certificate and token.", true);
+  };
+  socket.onclose = (event) => {
+    console.error(
+      "[bridge] onclose: code=" + (event && event.code) +
+        " reason=" + JSON.stringify(event && event.reason) +
+        " wasClean=" + (event && event.wasClean),
+    );
     socket = null;
     setStatus("Bridge disconnected; retrying…", true);
     scheduleReconnect();
