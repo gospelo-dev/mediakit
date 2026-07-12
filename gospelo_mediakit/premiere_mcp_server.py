@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastmcp import FastMCP
@@ -99,6 +100,7 @@ async def premiere_export_frame(
     height: int | None = None,
     solo_video_track: int | None = None,
     include_reflection: bool = False,
+    wait_seconds: float = 10.0,
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
     """Export one frame of the active Premiere sequence as a still image.
@@ -129,6 +131,10 @@ async def premiere_export_frame(
             video tracks are hidden for the export, then restored).
         include_reflection: Attach ``_reflect`` (available Exporter/TickTime
             method names) to aid diagnosing API coverage. Off by default.
+        wait_seconds: Premiere writes the image ASYNCHRONOUSLY after the
+            bridge call returns; the tool polls until the file appears with
+            a stable size (up to this many seconds) so ``fileExists: true``
+            means the file is really readable. Set 0 to skip waiting.
         timeout_seconds: Connection and response timeout (1-60 seconds).
 
     Returns:
@@ -161,6 +167,13 @@ async def premiere_export_frame(
     if solo_video_track is not None:
         params["soloVideoTrack"] = solo_video_track
 
+    expected_file = os.path.join(output_dir, file_name or "frame.png")
+    stat_before = None
+    try:
+        stat_before = os.stat(expected_file)
+    except OSError:
+        pass
+
     try:
         result = await _get_bridge().request(
             "program.exportFrame",
@@ -168,11 +181,30 @@ async def premiere_export_frame(
             timeout_seconds=timeout_seconds,
         )
         output_file = os.path.join(result.get("outputDir", output_dir), result.get("fileName", "frame.png"))
-        # The bridge and Premiere run on the same machine, so verify the file.
+        # Premiere writes the file asynchronously after the export call
+        # returns: poll (same machine) until a NEW file with a stable size
+        # is present, so callers can read it immediately.
+        file_ready = False
+        if result.get("exportReturn") and wait_seconds > 0:
+            deadline = asyncio.get_event_loop().time() + wait_seconds
+            last_size = -1
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    stat_now = os.stat(output_file)
+                except OSError:
+                    stat_now = None
+                if stat_now is not None and stat_now.st_size > 0:
+                    is_new = stat_before is None or stat_now.st_mtime != stat_before.st_mtime
+                    if is_new and stat_now.st_size == last_size:
+                        file_ready = True
+                        break
+                    last_size = stat_now.st_size
+                await asyncio.sleep(0.2)
         return {
             "ok": True,
             "outputFile": output_file,
             "fileExists": os.path.isfile(output_file),
+            "fileReady": file_ready,
             **result,
         }
     except PremiereBridgeError as exc:
@@ -957,26 +989,45 @@ async def premiere_set_clip_transform(
     track_type: str = "video",
     track_index: int = 0,
     scale: float | None = None,
+    scale_width: float | None = None,
+    uniform_scale: bool | None = None,
     position_x: float | None = None,
     position_y: float | None = None,
+    crop_left: float | None = None,
+    crop_top: float | None = None,
+    crop_right: float | None = None,
+    crop_bottom: float | None = None,
     tolerance_seconds: float = 0.05,
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
-    """Set a clip's Motion transform: scale and/or position (WRITE).
+    """Set a clip's Motion transform: scale, position and/or crop (WRITE).
 
     Rewrites the Motion fixed effect's parameters (found by matchName
     ``AE.ADBE Motion``, locale-independent) in one undoable transaction —
     the core of picture-in-picture. The response includes the values read
     BEFORE and AFTER the change, so the first call also calibrates the
-    units (position is expected in sequence pixels, scale in percent).
-    Call without scale/position to just read the current values.
+    units (position is NORMALIZED 0..1 with centre [0.5, 0.5], scales are
+    in percent). Call without any value to just read the current values.
+
+    Non-uniform scaling: pass ``scale_width`` to control width separately —
+    ``scale`` then acts as the HEIGHT scale (Premiere's UI semantics) and
+    the "uniform scale" checkbox is switched off automatically in the same
+    transaction. E.g. width-fit 99.28% with height squeezed to 97.84%:
+    ``scale_width=99.28, scale=97.84``.
 
     Args:
         item_start_seconds: Current start time of the clip.
         track_type: ``"video"`` or ``"audio"``.
         track_index: 0-based track index.
-        scale: New scale (percent, 100 = original size).
-        position_x / position_y: New position (both required together).
+        scale: New scale in percent (uniform; = height when ``scale_width``
+            is also given or uniform scaling is off).
+        scale_width: Width scale in percent (implies non-uniform scaling).
+        uniform_scale: Explicitly toggle the uniform-scale checkbox. Ignored
+            when ``scale_width`` is given (it forces ``False``).
+        position_x / position_y: New position, normalized 0..1 (both
+            required together; centre is 0.5, 0.5).
+        crop_left / crop_top / crop_right / crop_bottom: Crop percentages
+            (0-100) for the respective edge.
         tolerance_seconds: Start-time matching tolerance.
         timeout_seconds: Connection and response timeout (1-60 seconds).
 
@@ -993,10 +1044,22 @@ async def premiere_set_clip_transform(
     }
     if scale is not None:
         params["scale"] = scale
+    if scale_width is not None:
+        params["scaleWidth"] = scale_width
+    if uniform_scale is not None:
+        params["uniformScale"] = uniform_scale
     if position_x is not None:
         params["positionX"] = position_x
     if position_y is not None:
         params["positionY"] = position_y
+    for key, value in (
+        ("cropLeft", crop_left),
+        ("cropTop", crop_top),
+        ("cropRight", crop_right),
+        ("cropBottom", crop_bottom),
+    ):
+        if value is not None:
+            params[key] = value
 
     try:
         result = await _get_bridge().request(
@@ -1071,6 +1134,7 @@ async def premiere_list_sequences(
         "isNested"}]}, ...]}``. On failure ``{"ok": false, "error": "..."}``.
     """
     import os
+    from pathlib import Path
 
     from gospelo_mediakit.core.ffmpeg import probe as _probe
 
@@ -1212,6 +1276,7 @@ async def premiere_add_effect(
     effect_query: str | None = None,
     match_name: str | None = None,
     color_hex: str | None = None,
+    set_params: list[dict[str, Any]] | None = None,
     existing: bool = False,
     track_type: str = "video",
     track_index: int = 0,
@@ -1235,11 +1300,21 @@ async def premiere_add_effect(
     the effect's first colour-typed parameter — detected structurally — with
     automatic value-range calibration (0-255 vs 0-1: set, read back, retry).
 
+    ``set_params`` sets numeric/boolean parameters by index in one undoable
+    transaction, e.g. ``[{"index": 12, "value": 30}]`` raises Ultra Key's
+    "Soften" (matte cleanup). Each entry needs ``index`` (from the returned
+    ``params`` inventory) and ``value``; a read-back is returned per param.
+    To animate a parameter instead, pass ``keyframes``: ``[{"index": 0,
+    "keyframes": [{"timeSeconds": 7.7, "value": 100}, {"timeSeconds": 8.37,
+    "value": 0}]}]`` makes it time-varying and adds keyframes (clip time) —
+    e.g. an opacity fade-out on the intrinsic ``AE.ADBE Opacity`` component.
+
     Args:
         item_start_seconds: Current start time of the target clip.
         effect_query: Display-name substring to find the effect.
         match_name: Exact filter matchName (skips the lookup).
         color_hex: Colour for the first colour parameter (chroma key colour).
+        set_params: Numeric/boolean params to set: ``[{"index": N, "value": V}]``.
         track_type / track_index: Target track.
         tolerance_seconds: Start-time matching tolerance.
         timeout_seconds: Connection and response timeout (1-60 seconds).
@@ -1261,8 +1336,127 @@ async def premiere_add_effect(
         params["matchName"] = match_name
     if color_hex is not None:
         params["colorHex"] = color_hex
+    if set_params:
+        params["setParams"] = set_params
     if existing:
         params["existing"] = True
+
+    try:
+        result = await _get_bridge().request(
+            "sequence.addEffect",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_get_effect_params(
+    item_start_seconds: float,
+    effect_query: str | None = None,
+    match_name: str | None = None,
+    track_type: str = "video",
+    track_index: int = 0,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Inspect an effect/component already on a clip (read-only).
+
+    Returns the full parameter inventory (index / displayName / current
+    value) of a component on the clip's chain WITHOUT modifying anything —
+    use this before ``premiere_add_effect`` with ``set_params`` to discover
+    which parameter index does what. Works for applied effects (e.g.
+    ``effect_query="Ultra"``, ``"Lumetri"``) and intrinsic components
+    (``match_name="AE.ADBE Motion"`` / ``"AE.ADBE Opacity"``).
+
+    Args:
+        item_start_seconds: Current start time of the target clip.
+        effect_query: Display-name substring of the component to inspect.
+        match_name: Exact component matchName (skips the name lookup).
+        track_type / track_index: Target track.
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "matchName": "...", "params": [{"index": 0,
+        "displayName": "...", "value": ...}, ...]}``.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    params: dict[str, Any] = {
+        "trackType": track_type,
+        "trackIndex": track_index,
+        "itemStartSeconds": item_start_seconds,
+        "toleranceSeconds": tolerance_seconds,
+        "existing": True,
+    }
+    if effect_query is not None:
+        params["effectQuery"] = effect_query
+    if match_name is not None:
+        params["matchName"] = match_name
+
+    try:
+        result = await _get_bridge().request(
+            "sequence.addEffect",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_fade_clip(
+    item_start_seconds: float,
+    fade_start_seconds: float,
+    fade_end_seconds: float,
+    opacity_from: float = 100.0,
+    opacity_to: float = 0.0,
+    track_index: int = 0,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Fade a video clip's opacity between two times (WRITE).
+
+    Adds two keyframes to the clip's intrinsic Opacity component
+    (``AE.ADBE Opacity``) in one undoable transaction: ``opacity_from`` at
+    ``fade_start_seconds`` and ``opacity_to`` at ``fade_end_seconds``.
+    Defaults give a fade-OUT (100 -> 0); swap the values for a fade-in
+    (``opacity_from=0, opacity_to=100``). Times are in CLIP time — for a
+    clip whose start and in-point are 0 they equal sequence time; otherwise
+    subtract the clip's start and add its in-point.
+
+    Args:
+        item_start_seconds: Current start time of the target clip.
+        fade_start_seconds / fade_end_seconds: Keyframe times (clip time).
+        opacity_from / opacity_to: Opacity percentages at the two keyframes.
+        track_index: 0-based video track index.
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "paramsSet": [{"index": 0, "timeVarying": true,
+        ...}]}``. On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    params: dict[str, Any] = {
+        "trackType": "video",
+        "trackIndex": track_index,
+        "itemStartSeconds": item_start_seconds,
+        "toleranceSeconds": tolerance_seconds,
+        "existing": True,
+        "matchName": "AE.ADBE Opacity",
+        "setParams": [
+            {
+                "index": 0,
+                "keyframes": [
+                    {"timeSeconds": fade_start_seconds, "value": opacity_from},
+                    {"timeSeconds": fade_end_seconds, "value": opacity_to},
+                ],
+            }
+        ],
+    }
 
     try:
         result = await _get_bridge().request(

@@ -161,6 +161,7 @@ write 系のテストは使い捨てプロジェクト（`premiere_create_projec
 | `width` / `height` | int | シーケンスのフレームサイズ | 出力解像度 |
 | `solo_video_track` | int | なし | 指定ビデオトラック**単体**の画を書き出す。他のビデオトラックを一時的に非表示（トラック出力ミュート）にして書き出し、**同一コール内で必ず元の状態へ復元**（応答の `soloToggled` / `soloRestored` で確認可能） |
 | `include_reflection` | bool | `false` | `_reflect`（Exporter / TickTime の利用可能メソッド一覧）を付加 |
+| `wait_seconds` | float | `10.0` | Premiere の画像書き込みは**ブリッジ応答後に非同期で行われる**ため、新しいファイルがサイズ安定で現れるまでポーリングして待つ（応答の `fileReady: true` で読み取り可能を保証）。`0` で待機なし |
 | `timeout_seconds` | float | `30.0` | 接続・応答タイムアウト（1〜60 秒） |
 
 **戻り値**（実測データ）:
@@ -568,16 +569,62 @@ capsuleID を毎回新規化）→ ② `sequence.insertMogrt` でキュー開始
   実機で確定: **`ppro.Color` は 0〜1 の浮動小数**（0-255 を渡すとクランプされ
   意図しない色になる — 初回実装の失敗から較正機構で回復）
 - **`existing=true`**: 適用済みエフェクトをクリップ上で検索して検査・再設定
-  （二重適用なし）
+  （二重適用なし）。Motion / Opacity などの**固有コンポーネント**も
+  `match_name` で対象にできる
+- **`set_params`**: 数値/ブールパラメータを index 指定で一括設定
+  （`[{"index": 12, "value": 30}]`）。1 トランザクション・読み返し付き。
+  `keyframes` 形式（`[{"index": 0, "keyframes": [{"timeSeconds": 7.7,
+  "value": 100}, ...]}]`）で **`createSetTimeVaryingAction` +
+  `createAddKeyframeAction` によるキーフレームアニメーション**も可能
+  （時刻はクリップ時間）
 
 **引数**: `item_start_seconds`, `effect_query` または `match_name`,
-`color_hex?`, `existing?`, `track_type`, `track_index`
+`color_hex?`, `set_params?`, `existing?`, `track_type`, `track_index`
 
 **検証結果**: misaki（ブルーバック `#002FFA`）に Ultra キーを適用し、
 キーカラーを較正セット（読み返し (0, 0.184, 0.9725) ≈ #002FFA）。フレーム
 書き出しで**ブルーが完全に抜け、下のオフィス背景に合成**されることを目視確認。
 Ultra キーの全 26 パラメータ（キーカラー=index 2、透明度・許容量・スピル等）の
 地図も取得済み。
+
+**確定済みパラメータ地図**（実機で読み取り・設定検証済み）:
+
+- **Ultra キー** (`AE.ADBE Ultra Key`): 2=キーカラー、11=チョーク、12=柔らかく
+- **Motion** (`AE.ADBE Motion`): 0=位置（正規化 0..1）、1=スケール（非均等時は縦）、
+  2=スケール(幅)、3=縦横比固定、7〜10=切り抜き 左/上/右/下
+- **Opacity** (`AE.ADBE Opacity`): 0=不透明度、1・2=描画モード
+- **Lumetri カラー** (`AE.ADBE Lumetri`): 14=色温度、16=彩度、19=露光量、
+  20=コントラスト、21=ハイライト、22=シャドウ、23=白レベル、24=黒レベル、
+  41=シャープ、42=自然な彩度、110=ビネット適用量（全 130 個）
+
+---
+
+## premiere_get_effect_params（read）
+
+適用済みエフェクト/固有コンポーネントのパラメータ一覧（index / displayName /
+現在値）を**変更なしで**取得する。実体は `sequence.addEffect` の
+`existing=true` だが、読み取り専用ツールとして分離することで、照会目的の
+呼び出しが誤ってエフェクトを新規適用する事故を防ぐ。`set_params` で index を
+指定する前の地図取りに使う。
+
+**引数**: `item_start_seconds`, `effect_query` または `match_name`,
+`track_type`, `track_index`
+
+---
+
+## premiere_fade_clip（write・不透明度フェード）
+
+クリップの Opacity（`AE.ADBE Opacity`）にキーフレームを 2 つ打ち、
+フェードアウト（既定 100→0）/フェードイン（`opacity_from=0, opacity_to=100`）を
+1 コールで設定する糖衣ツール。時刻は**クリップ時間**（start=0・in=0 の
+クリップならシーケンス時間と一致）。
+
+**引数**: `item_start_seconds`, `fade_start_seconds`, `fade_end_seconds`,
+`opacity_from?`, `opacity_to?`, `track_index`
+
+**検証結果**: man_walk クリップに 7.7s→8.375s のフェードアウトを設定。
+`timeVarying: true` 読み返し確認、中間フレーム（8.05s）で約 50% ブレンドを
+目視確認。
 
 ---
 
@@ -602,7 +649,9 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_razor_clip` | `sequence.razorClip` | write（1→2クリップ分割・戦略自動選択） |
 | `premiere_create_subsequence` | `sequence.createSubsequence` | write（子シーケンス作成・タイムライン不変） |
 | `premiere_remove_clip` | `sequence.removeClip` | write（取り消し可能・ripple 対応） |
-| `premiere_set_clip_transform` | `sequence.setClipTransform` | write（Motion スケール/位置・読み取り較正つき） |
+| `premiere_set_clip_transform` | `sequence.setClipTransform` | write（Motion スケール/位置/切り抜き・非均等スケール対応・読み取り較正つき） |
+| `premiere_get_effect_params` | `sequence.addEffect`（existing・読み取りのみ） | read（パラメータ地図の照会） |
+| `premiere_fade_clip` | `sequence.addEffect`（Opacity キーフレーム） | write（フェードイン/アウト糖衣） |
 | `premiere_set_active_sequence` | `project.setActiveSequence` | write（UI 状態のみ・ネスト操作の鍵） |
 | `premiere_list_sequences` | `project.listSequences` | read（全シーケンスの画角/fps/トランスフォーム） |
 | `premiere_create_sequence` | `project.createSequence` | write（既存プロジェクト内・先頭素材の画角採用） |

@@ -1531,8 +1531,17 @@ async function setClipTransform(params) {
   }
   if (!motion) throw new Error("Motion component (AE.ADBE Motion) not found on the clip.");
 
+  // Motion param layout (fixed): 0 position, 1 scale (= height when
+  // non-uniform), 2 scale width, 3 uniform-scale checkbox, 7-10 crop L/T/R/B.
   const positionParam = await safe("getParam(0)", async () => motion.getParam(0), null); // 位置 / Position
   const scaleParam = await safe("getParam(1)", async () => motion.getParam(1), null); // スケール / Scale
+  const scaleWidthParam = await safe("getParam(2)", async () => motion.getParam(2), null);
+  const uniformParam = await safe("getParam(3)", async () => motion.getParam(3), null);
+  const CROP_INDICES = { cropLeft: 7, cropTop: 8, cropRight: 9, cropBottom: 10 };
+  const cropParams = {};
+  for (const [key, index] of Object.entries(CROP_INDICES)) {
+    cropParams[key] = await safe(`getParam(${index})`, async () => motion.getParam(index), null);
+  }
 
   async function readParamValue(param, label) {
     return await safe(`${label}.getStartValue`, async () => {
@@ -1549,26 +1558,44 @@ async function setClipTransform(params) {
     name: await safe("item.getName", async () => await target.getName(), null),
     positionBefore: positionParam ? await readParamValue(positionParam, "position") : null,
     scaleBefore: scaleParam ? await readParamValue(scaleParam, "scale") : null,
+    scaleWidthBefore: scaleWidthParam ? await readParamValue(scaleWidthParam, "scaleWidth") : null,
+    uniformScaleBefore: uniformParam ? await readParamValue(uniformParam, "uniformScale") : null,
     positionAfter: null,
     scaleAfter: null,
     diagnostics,
   };
 
-  const wantScale = params.scale !== undefined && params.scale !== null;
-  const wantPosition =
-    params.positionX !== undefined && params.positionX !== null && params.positionY !== undefined && params.positionY !== null;
-  if (!wantScale && !wantPosition) return result; // read-only call
+  const has = (v) => v !== undefined && v !== null;
+  const wantScale = has(params.scale);
+  const wantScaleWidth = has(params.scaleWidth);
+  const wantPosition = has(params.positionX) && has(params.positionY);
+  const wantedCrops = Object.keys(CROP_INDICES).filter((key) => has(params[key]));
+  if (!wantScale && !wantScaleWidth && !wantPosition && wantedCrops.length === 0) return result; // read-only call
+
+  // Setting scale width implies non-uniform scaling; turn the checkbox off
+  // in the same transaction so the width value actually takes effect.
+  const setUniform = wantScaleWidth ? false : has(params.uniformScale) ? Boolean(params.uniformScale) : null;
 
   result.applied = runTransaction(
     project,
     () => {
       const actions = [];
+      if (setUniform !== null && uniformParam) {
+        actions.push(uniformParam.createSetValueAction(uniformParam.createKeyframe(setUniform), true));
+      }
       if (wantScale && scaleParam) {
         actions.push(scaleParam.createSetValueAction(scaleParam.createKeyframe(Number(params.scale)), true));
+      }
+      if (wantScaleWidth && scaleWidthParam) {
+        actions.push(scaleWidthParam.createSetValueAction(scaleWidthParam.createKeyframe(Number(params.scaleWidth)), true));
       }
       if (wantPosition && positionParam) {
         const point = new ppro.PointF(Number(params.positionX), Number(params.positionY));
         actions.push(positionParam.createSetValueAction(positionParam.createKeyframe(point), true));
+      }
+      for (const key of wantedCrops) {
+        const param = cropParams[key];
+        if (param) actions.push(param.createSetValueAction(param.createKeyframe(Number(params[key])), true));
       }
       return actions;
     },
@@ -1578,6 +1605,12 @@ async function setClipTransform(params) {
 
   result.positionAfter = positionParam ? await readParamValue(positionParam, "positionAfter") : null;
   result.scaleAfter = scaleParam ? await readParamValue(scaleParam, "scaleAfter") : null;
+  result.scaleWidthAfter = scaleWidthParam ? await readParamValue(scaleWidthParam, "scaleWidthAfter") : null;
+  result.uniformScaleAfter = uniformParam ? await readParamValue(uniformParam, "uniformScaleAfter") : null;
+  for (const key of wantedCrops) {
+    const param = cropParams[key];
+    if (param) result[`${key}After`] = await readParamValue(param, `${key}After`);
+  }
   return result;
 }
 
@@ -1855,6 +1888,47 @@ async function addEffect(params) {
     }
   } else if (params.colorHex && !colorParam) {
     diagnostics.push("colorHex given but no colour-typed parameter was detected on the effect.");
+  }
+
+  // Optional: set numeric / boolean parameters by index in one transaction.
+  // Each spec is {index, value} for a static value, or {index, keyframes:
+  // [{timeSeconds, value}, ...]} to make the param time-varying and add
+  // keyframes (times are in CLIP time).
+  if (Array.isArray(params.setParams) && params.setParams.length > 0) {
+    const setters = [];
+    for (const spec of params.setParams) {
+      const param = await safe(`setParam.getParam(${spec.index})`, async () => applied.getParam(Number(spec.index)), null);
+      if (param) setters.push({ param, index: Number(spec.index), value: spec.value, keyframes: spec.keyframes });
+    }
+    const committed = runTransaction(
+      project,
+      () =>
+        setters.flatMap((s) => {
+          if (Array.isArray(s.keyframes) && s.keyframes.length > 0) {
+            const actions = [s.param.createSetTimeVaryingAction(true)];
+            for (const kf of s.keyframes) {
+              const keyframe = s.param.createKeyframe(kf.value);
+              keyframe.position = ppro.TickTime.createWithSeconds(Number(kf.timeSeconds));
+              actions.push(s.param.createAddKeyframeAction(keyframe));
+            }
+            return actions;
+          }
+          return [s.param.createSetValueAction(s.param.createKeyframe(s.value), true)];
+        }),
+      "Gospelo bridge: set effect params",
+      diagnostics,
+    );
+    result.paramsSet = [];
+    for (const s of setters) {
+      result.paramsSet.push({
+        index: s.index,
+        requested: Array.isArray(s.keyframes) && s.keyframes.length > 0 ? { keyframes: s.keyframes } : s.value,
+        timeVarying: committed && Array.isArray(s.keyframes) && s.keyframes.length > 0
+          ? await safe(`setParamIsTimeVarying${s.index}`, async () => s.param.isTimeVarying(), null)
+          : undefined,
+        readback: committed ? await readComponentParamValue(s.param, `setParamReadback${s.index}`, safe) : null,
+      });
+    }
   }
   return result;
 }
