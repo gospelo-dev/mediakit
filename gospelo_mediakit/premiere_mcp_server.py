@@ -605,23 +605,66 @@ async def premiere_move_clip(
 
 
 @mcp.tool()
-async def premiere_set_track_mute(
-    mute: bool,
-    track_type: str = "audio",
+async def premiere_set_video_track_output(
+    visible: bool,
     track_index: int = 0,
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
-    """Mute or unmute a track on the active sequence (WRITE).
+    """Show or hide a video track on the active sequence (WRITE).
 
-    Uses Premiere's documented ``track.setMute`` setter and reads the state
-    back, so the response is its own act -> observe confirmation. Note this
-    is MUTE (silences/hides output), not track LOCK — Premiere's UXP API has
-    no lock operation yet.
+    This is the timeline's eye icon (track output): a hidden track is
+    excluded from the program monitor and from ``premiere_export_frame``
+    composites. Uses Premiere's ``track.setMute`` under the hood and reads
+    the state back, so the response is its own act -> observe confirmation.
+    Note this is visibility, not track LOCK — Premiere's UXP API has no lock
+    operation yet. For one-off single-track frame exports, prefer
+    ``premiere_export_frame(solo_video_track=...)`` which restores state
+    automatically.
+
+    Args:
+        visible: True to show the track, False to hide it.
+        track_index: 0-based video track index (V1 is 0).
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "visibleBefore": ..., "visibleAfter": ...,
+        "changed": ...}``. On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "sequence.setTrackMute",
+            {"trackType": "video", "trackIndex": track_index, "mute": not visible},
+            timeout_seconds=timeout_seconds,
+        )
+        muted_before = result.pop("mutedBefore", None)
+        muted_after = result.pop("mutedAfter", None)
+        result.pop("requested", None)
+        return {
+            "ok": True,
+            "visibleBefore": None if muted_before is None else not muted_before,
+            "visibleAfter": None if muted_after is None else not muted_after,
+            **result,
+        }
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_set_audio_track_mute(
+    mute: bool,
+    track_index: int = 0,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Mute or unmute an audio track on the active sequence (WRITE).
+
+    This is the timeline's M button. Uses Premiere's documented
+    ``track.setMute`` setter and reads the state back, so the response is
+    its own act -> observe confirmation. Note this is MUTE, not track LOCK —
+    Premiere's UXP API has no lock operation yet.
 
     Args:
         mute: True to mute, False to unmute.
-        track_type: ``"audio"`` (default) or ``"video"``.
-        track_index: 0-based track index (A1 is audio/0).
+        track_index: 0-based audio track index (A1 is 0).
         timeout_seconds: Connection and response timeout (1-60 seconds).
 
     Returns:
@@ -631,7 +674,7 @@ async def premiere_set_track_mute(
     try:
         result = await _get_bridge().request(
             "sequence.setTrackMute",
-            {"trackType": track_type, "trackIndex": track_index, "mute": mute},
+            {"trackType": "audio", "trackIndex": track_index, "mute": mute},
             timeout_seconds=timeout_seconds,
         )
         return {"ok": True, **result}

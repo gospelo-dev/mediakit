@@ -337,19 +337,27 @@ L1 状態が予測したとおり該当時刻のクリップ（`misaki_9_colorma
 
 ---
 
-## premiere_set_track_mute（write）
+## premiere_set_video_track_output / premiere_set_audio_track_mute（write）
 
-アクティブシーケンスのトラックをミュート/解除する（`sequence.setTrackMute` →
-公式 API `track.setMute`）。応答に before/after の実測値を含むため、1 往復で
-act → observe が完結する。**ミュートであってロックではない**（トラックロックの
-操作 API は UXP に存在しない — `EVENT_TRACK_LOCK_CHANGED` イベントのみ）。
+トラックの出力状態を切り替える 2 ツール。どちらも同じブリッジメソッド
+`sequence.setTrackMute`（公式 API `track.setMute`）の薄いラッパーだが、
+Premiere の UI の呼び名に合わせて分割している:
 
-**引数**: `mute`（必須）, `track_type`（既定 `audio`）, `track_index`（既定 0 = A1）
+| ツール | 対応 UI | 引数 |
+|---|---|---|
+| `premiere_set_video_track_output` | 目アイコン（トラック出力） | `visible`（true で表示）, `track_index` |
+| `premiere_set_audio_track_mute` | M ボタン（ミュート） | `mute`（true で消音）, `track_index` |
 
-**戻り値**（実測）: `{"ok": true, "trackType": "audio", "trackIndex": 0, "requested": true, "mutedBefore": false, "mutedAfter": true, "changed": true, "diagnostics": []}`
+- 応答に before/after の実測値を含むため、1 往復で act → observe が完結
+  （video 側は `visibleBefore/After`、audio 側は `mutedBefore/After`）
+- **ロックではない**（トラックロックの操作 API は UXP に存在しない —
+  `EVENT_TRACK_LOCK_CHANGED` イベントのみ）
+- 単発の「1 トラックだけの画が欲しい」なら、自動復元つきの
+  `premiere_export_frame(solo_video_track=…)` を推奨
 
-**検証結果**: A1 のミュートを実行、`mutedBefore: false → mutedAfter: true` を
-実測確認。diagnostics 0 件。
+**検証結果**: A1 のミュート（`mutedBefore: false → mutedAfter: true`）、
+V3 の表示 OFF→ON（solo_video_track 実験内で before/after 確認）とも実測済み。
+diagnostics 0 件。
 
 ---
 
@@ -423,7 +431,8 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_add_marker` | `sequence.addMarker` | write（取り消し可能） |
 | `premiere_import_media` | `project.importMedia` | write（ビンへの追加のみ） |
 | `premiere_move_clip` | `sequence.moveClip` | write（取り消し可能・垂直移動は clone+remove 合成） |
-| `premiere_set_track_mute` | `sequence.setTrackMute` | write（直接セッター・応答に before/after） |
+| `premiere_set_video_track_output` | `sequence.setTrackMute`（video） | write（目アイコン相当・応答に before/after） |
+| `premiere_set_audio_track_mute` | `sequence.setTrackMute`（audio） | write（M ボタン相当・応答に before/after） |
 | `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |
 | `premiere_add_telops` | `sequence.insertMogrt`（キューごと） | write（取り消し可能・完全自動） |
 
