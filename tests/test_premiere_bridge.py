@@ -455,6 +455,50 @@ def test_trim_clip_round_trip():
     asyncio.run(run())
 
 
+def test_razor_clip_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "sequence.razorClip",
+                {
+                    "trackType": "video",
+                    "trackIndex": 0,
+                    "itemStartSeconds": 0.0,
+                    "cutSequenceSeconds": 3.1875,
+                },
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "sequence.razorClip"
+        assert request["params"]["cutSequenceSeconds"] == 3.1875
+
+        payload = {
+            "split": True,
+            "strategy": "clone-tail",
+            "before": {"startSeconds": 0, "endSeconds": 1649.0625, "inSeconds": 0, "outSeconds": 1649.0625},
+            "original": {"startSeconds": 0, "endSeconds": 3.1875, "inSeconds": 0, "outSeconds": 3.1875},
+            "clone": {"startSeconds": 3.1875, "endSeconds": 1649.0625, "inSeconds": 3.1875, "outSeconds": 1649.0625},
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["split"] is True
+        assert result["strategy"] == "clone-tail"
+        assert result["original"]["endSeconds"] == 3.1875
+        assert result["clone"]["startSeconds"] == 3.1875
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()

@@ -120,6 +120,7 @@ class PremiereBridge:
             "sequence.moveClip",
             "sequence.setTrackMute",
             "sequence.trimClip",
+            "sequence.razorClip",
         }
     )
 

@@ -143,6 +143,8 @@ function connect() {
         result = await setTrackMute(params);
       } else if (message.method === "sequence.trimClip") {
         result = await trimClip(params);
+      } else if (message.method === "sequence.razorClip") {
+        result = await razorClip(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -1112,6 +1114,236 @@ async function trimClip(params) {
       result.gapClosed = true;
     }
   }
+  return result;
+}
+
+// ---- sequence.razorClip (split one clip into two at a timeline position) ------
+// Premiere's API has no razor. Composite recipe from verified primitives:
+// clone the clip onto the SAME track with a time offset in overwrite mode
+// (the overwritten half of the original is auto-trimmed away), then edge-trim
+// the clone and move it into place. Two mirror strategies exist; the clone
+// overhangs the original by the length of the piece being created, so we
+// auto-pick the feasible strategy with the SHORTER overhang and require its
+// hazard zone to be empty. Every step is observed; on an unexpected
+// intermediate state we stop immediately (one undo from safety).
+
+async function listOtherItems(track, target, safe) {
+  const items = (await safe("getTrackItems(zone)", async () => await getTrackItems(track), [])) || [];
+  const out = [];
+  for (const item of items) {
+    if (item === target) continue;
+    const times = await readItemTimes(item, safe);
+    if (times.startSeconds !== null && times.endSeconds !== null) out.push(times);
+  }
+  return out;
+}
+
+function zoneIsFree(others, zoneStart, zoneEnd) {
+  const eps = 1e-6;
+  return others.every((it) => it.endSeconds <= zoneStart + eps || it.startSeconds >= zoneEnd - eps);
+}
+
+async function findItemByTimes(track, wantStart, wantEnd, tolerance, safe) {
+  const items = (await safe("getTrackItems(find)", async () => await getTrackItems(track), [])) || [];
+  for (const item of items) {
+    const start = await safe("find.getStartTime", async () => tickTimeToSeconds(await item.getStartTime()), null);
+    const end = await safe("find.getEndTime", async () => tickTimeToSeconds(await item.getEndTime()), null);
+    if (
+      start !== null &&
+      end !== null &&
+      Math.abs(start - wantStart) <= tolerance &&
+      Math.abs(end - wantEnd) <= tolerance
+    ) {
+      return item;
+    }
+  }
+  return null;
+}
+
+async function razorClip(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (params.cutSequenceSeconds === undefined || params.cutSequenceSeconds === null) {
+    throw new Error("cutSequenceSeconds is required.");
+  }
+  if (params.itemStartSeconds === undefined || params.itemStartSeconds === null) {
+    throw new Error("itemStartSeconds is required (identifies the clip to split).");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const trackType = params.trackType === "audio" ? "audio" : "video";
+  const trackIndex = Number(params.trackIndex || 0);
+  const tolerance = params.toleranceSeconds !== undefined ? Number(params.toleranceSeconds) : 0.05;
+  const cut = Number(params.cutSequenceSeconds);
+
+  const track = await safe(
+    `${trackType}Track(${trackIndex})`,
+    async () =>
+      trackType === "video" ? await sequence.getVideoTrack(trackIndex) : await sequence.getAudioTrack(trackIndex),
+    null,
+  );
+  if (!track) throw new Error(`Track not found: ${trackType}[${trackIndex}]`);
+
+  const items = (await safe("getTrackItems", async () => await getTrackItems(track), [])) || [];
+  let target = null;
+  const starts = [];
+  for (const item of items) {
+    const start = await safe("item.getStartTime", async () => tickTimeToSeconds(await item.getStartTime()), null);
+    starts.push(start);
+    if (start !== null && Math.abs(start - Number(params.itemStartSeconds)) <= tolerance) {
+      target = item;
+      break;
+    }
+  }
+  if (!target) {
+    throw new Error(
+      `No clip starting at ${params.itemStartSeconds}s (tolerance ${tolerance}s) on ${trackType}[${trackIndex}]. ` +
+        `Clip starts on that track: ${JSON.stringify(starts)}`,
+    );
+  }
+
+  const before = await readItemTimes(target, safe);
+  if (before.startSeconds === null || before.endSeconds === null || before.inSeconds === null) {
+    throw new Error("Could not read the clip's current times.");
+  }
+  const S = before.startSeconds;
+  const E = before.endSeconds;
+  const I = before.inSeconds;
+  if (!(S + 1e-6 < cut && cut < E - 1e-6)) {
+    throw new Error(`cutSequenceSeconds (${cut}) must be strictly inside the clip [${S}..${E}].`);
+  }
+  const headLen = cut - S; // Δ
+  const tailLen = E - cut; // Γ
+
+  // Strategy feasibility: the clone overhangs by the created piece's length.
+  const others = await listOtherItems(track, target, safe);
+  const canCloneTail = zoneIsFree(others, E, E + headLen); // overhang after the clip
+  const canCloneHead = S - tailLen >= -1e-9 && zoneIsFree(others, S - tailLen, S); // overhang before
+  let strategy = null;
+  if (canCloneTail && canCloneHead) strategy = headLen <= tailLen ? "clone-tail" : "clone-head";
+  else if (canCloneTail) strategy = "clone-tail";
+  else if (canCloneHead) strategy = "clone-head";
+  else {
+    throw new Error(
+      `No feasible razor strategy: need ${headLen}s free after ${E}s or ${tailLen}s free before ${S}s ` +
+        `(and non-negative timeline). Other clips: ${JSON.stringify(others)}`,
+    );
+  }
+
+  const editor = await safe("SequenceEditor.getEditor", async () => ppro.SequenceEditor.getEditor(sequence), null);
+  if (!editor) throw new Error("SequenceEditor unavailable (see diagnostics).");
+  const isVideo = trackType === "video";
+
+  const result = {
+    split: false,
+    strategy,
+    before,
+    original: null,
+    clone: null,
+    diagnostics,
+  };
+
+  const offset = strategy === "clone-tail" ? headLen : -tailLen;
+  const offsetTime = await safe(
+    "TickTime.createWithSeconds(cloneOffset)",
+    async () => ppro.TickTime.createWithSeconds(offset),
+    null,
+  );
+  if (!offsetTime) return result;
+
+  // Step 1: clone in place with the offset (overwrite trims the original).
+  const cloned = runTransaction(
+    project,
+    () => editor.createCloneTrackItemAction(target, offsetTime, 0, 0, isVideo, false),
+    "Gospelo bridge: razor step 1 (clone)",
+    diagnostics,
+  );
+  if (!cloned) return result;
+
+  // Observe: the original must now be exactly one piece.
+  const originalAfterClone = await readItemTimes(target, safe);
+  const expectOriginal =
+    strategy === "clone-tail"
+      ? { start: S, end: cut } // tail overwritten away
+      : { start: cut, end: E }; // head overwritten away
+  if (
+    originalAfterClone.startSeconds === null ||
+    Math.abs(originalAfterClone.startSeconds - expectOriginal.start) > tolerance ||
+    Math.abs(originalAfterClone.endSeconds - expectOriginal.end) > tolerance
+  ) {
+    result.original = originalAfterClone;
+    diagnostics.push(
+      `razor aborted after step 1: original observed ${JSON.stringify(originalAfterClone)}, ` +
+        `expected ~${JSON.stringify(expectOriginal)}. One undo reverts the clone.`,
+    );
+    return result;
+  }
+
+  // Locate the clone by its expected placement.
+  const cloneWant =
+    strategy === "clone-tail"
+      ? { start: cut, end: E + headLen }
+      : { start: S - tailLen, end: cut };
+  const clone = await findItemByTimes(track, cloneWant.start, cloneWant.end, Math.max(tolerance, 0.1), safe);
+  if (!clone) {
+    diagnostics.push(
+      `razor aborted after step 1: clone not found at ~${JSON.stringify(cloneWant)}. One undo reverts.`,
+    );
+    result.original = originalAfterClone;
+    return result;
+  }
+
+  // Step 2: edge-trim the clone to the piece's content.
+  const trimPoint = I + headLen; // source position of the cut
+  const trimTime = await safe(
+    "TickTime.createWithSeconds(trim)",
+    async () => ppro.TickTime.createWithSeconds(trimPoint),
+    null,
+  );
+  if (!trimTime) return result;
+  const trimmed = runTransaction(
+    project,
+    () =>
+      strategy === "clone-tail"
+        ? clone.createSetInPointAction(trimTime) // left-trim: becomes the tail content
+        : clone.createSetOutPointAction(trimTime), // right-trim: becomes the head content
+    "Gospelo bridge: razor step 2 (trim clone)",
+    diagnostics,
+  );
+  if (!trimmed) {
+    result.original = originalAfterClone;
+    result.clone = await readItemTimes(clone, safe);
+    return result;
+  }
+
+  // Step 3: move the clone into its final place.
+  const moveBack = strategy === "clone-tail" ? -headLen : tailLen;
+  const moveTime = await safe(
+    "TickTime.createWithSeconds(moveBack)",
+    async () => ppro.TickTime.createWithSeconds(moveBack),
+    null,
+  );
+  if (!moveTime) return result;
+  const moved = runTransaction(
+    project,
+    () => clone.createMoveAction(moveTime),
+    "Gospelo bridge: razor step 3 (place clone)",
+    diagnostics,
+  );
+
+  result.original = await readItemTimes(target, safe);
+  result.clone = await readItemTimes(clone, safe);
+  result.split =
+    moved &&
+    result.original.startSeconds !== null &&
+    result.clone.startSeconds !== null &&
+    Math.abs(
+      Math.min(result.original.startSeconds, result.clone.startSeconds) - S,
+    ) <= tolerance &&
+    Math.abs(Math.max(result.original.endSeconds, result.clone.endSeconds) - E) <= tolerance;
   return result;
 }
 

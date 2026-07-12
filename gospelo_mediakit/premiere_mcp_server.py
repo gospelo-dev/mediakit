@@ -800,6 +800,62 @@ async def premiere_ripple_delete_head(
 
 
 @mcp.tool()
+async def premiere_razor_clip(
+    cut_sequence_seconds: float,
+    item_start_seconds: float,
+    track_type: str = "video",
+    track_index: int = 0,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Split one clip into two at a timeline position, like the razor (WRITE).
+
+    Premiere's API has no razor, so this composes verified primitives on the
+    same track: clone the clip with a time offset in overwrite mode (which
+    auto-trims the overwritten half of the original), edge-trim the clone,
+    and move it into place. Content continuity across the cut is preserved.
+
+    The clone momentarily overhangs the clip by the created piece's length,
+    so the bridge auto-picks the feasible strategy with the SHORTER overhang
+    (clone-tail: needs head-length of free space after the clip; clone-head:
+    needs tail-length of free space before it) and refuses if neither zone is
+    empty. Each step is observed; on an unexpected intermediate state it
+    stops immediately (one undo from safety). A full undo takes up to three
+    undos. Linked A/V pairs do not follow — razor video and audio separately.
+
+    Args:
+        cut_sequence_seconds: Timeline position of the cut (strictly inside
+            the clip).
+        item_start_seconds: Current start time of the clip to split.
+        track_type: ``"video"`` or ``"audio"``.
+        track_index: 0-based track index.
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "split": true, "strategy": "clone-tail"|"clone-head",
+        "before": {...}, "original": {...}, "clone": {...}}`` with observed
+        start/end/in/out for both resulting pieces.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "sequence.razorClip",
+            {
+                "trackType": track_type,
+                "trackIndex": track_index,
+                "itemStartSeconds": item_start_seconds,
+                "cutSequenceSeconds": cut_sequence_seconds,
+                "toleranceSeconds": tolerance_seconds,
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

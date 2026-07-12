@@ -368,6 +368,43 @@ diagnostics 0 件。失敗時の安全性も確認済み（合成トランザク
 
 ---
 
+## premiere_razor_clip（write・レザーカット）
+
+**1 クリップをタイムライン位置で 2 クリップに分割**する（`sequence.razorClip`）。
+Premiere の API にレザーは存在しないため、検証済みプリミティブの合成で実現:
+
+```
+① 同トラックへ時間オフセット付きクローン（overwrite）
+     → 上書きされた側の元クリップ半分が自動で切り詰められる（実機確定）
+② クローンをエッジトリム（左端 or 右端）
+③ クローンを相対移動で最終位置へ
+```
+
+クローンは「作られる側のピースの長さ」ぶん元クリップからはみ出すため、
+**実行可能な戦略のうち、はみ出しが短い方を自動選択**する:
+
+| 戦略 | クローンが成る側 | はみ出し区間（要空き） |
+|---|---|---|
+| `clone-tail` | 後半ピース | クリップ後方に前半の長さぶん |
+| `clone-head` | 前半ピース | クリップ前方に後半の長さぶん（タイムライン負値は不可） |
+
+どちらも実行不可なら、周辺クリップの一覧つきで拒否する。各ステップ後に観測し、
+想定外の中間状態では**即停止**（Undo 1 回で戻れる地点）。完全な取り消しは
+最大 Undo 3 回。リンク A/V は追従しないため映像・音声を個別に分割する。
+
+**引数**: `cut_sequence_seconds`（タイムライン時刻・クリップ内側必須）,
+`item_start_seconds`, `track_type`, `track_index`, `tolerance_seconds`,
+`timeout_seconds`
+
+**戻り値**（実測）: `{"ok": true, "split": true, "strategy": "clone-tail", "before": {...}, "original": {start: 0, end: 3.1875, in: 0, out: 3.1875}, "clone": {start: 3.1875, end: 1649.0625, in: 3.1875, out: 1649.0625}, "diagnostics": []}`
+
+**検証結果**: 27.5 分のクリップを 00:00:03:03（3.1875s @16fps）で分割。
+2 ピースが隙間なく密着し、各ピースの `in` がタイムライン位置と一致
+（= カット点で内容が継ぎ目なく連続）。全体スパンは分割前と完全一致。
+再実行でも同一結果（再現性確認済み）。diagnostics 0 件。
+
+---
+
 ## premiere_set_video_track_output / premiere_set_audio_track_mute（write）
 
 トラックの出力状態を切り替える 2 ツール。どちらも同じブリッジメソッド
@@ -464,6 +501,7 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_move_clip` | `sequence.moveClip` | write（取り消し可能・垂直移動は clone+remove 合成） |
 | `premiere_trim_clip` | `sequence.trimClip` | write（エッジトリム・応答に before/after） |
 | `premiere_ripple_delete_head` | `sequence.trimClip`（closeGap） | write（カット＋前半削除＋詰めを1コール） |
+| `premiere_razor_clip` | `sequence.razorClip` | write（1→2クリップ分割・戦略自動選択） |
 | `premiere_set_video_track_output` | `sequence.setTrackMute`（video） | write（目アイコン相当・応答に before/after） |
 | `premiere_set_audio_track_mute` | `sequence.setTrackMute`（audio） | write（M ボタン相当・応答に before/after） |
 | `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |
