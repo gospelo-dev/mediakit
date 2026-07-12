@@ -1,6 +1,6 @@
 ---
 name: gospelo-mediakit
-description: Video utilities for AI video production. (1) mediakit_extract_frames — first/last frame to image files. (2) mediakit_change_speed — re-time a clip (e.g. 4s->1s) keeping frame rate and audio pitch/volume. (3) mediakit_color_match — match a video's colour toward a reference image (fixes AI-generation colour drift like a dropped blue channel) via per-channel mean match. The gospelo_mediakit package (distribution gospelo-mediakit-mcp) does the deterministic ffmpeg work; Codex calls the MCP tools. (4) mediakit_probe — read-only media info (width/height/fps/duration/codecs). Results include input_format/output_format and a processing block (filters applied + full ffmpeg command). Registered once in ~/.codex/config.toml, shared by the Codex CLI and App.
+description: Video utilities for AI video production. (1) mediakit_extract_frames — first/last frame to image files. (2) mediakit_change_speed — re-time a clip (e.g. 4s->1s) keeping frame rate and audio pitch/volume. (3) mediakit_color_match — match a video's colour toward a reference image (fixes AI-generation colour drift like a dropped blue channel) via per-channel mean match. The gospelo_mediakit package (distribution gospelo-mediakit-mcp) does the deterministic ffmpeg work; Codex calls the MCP tools. (4) mediakit_probe — read-only media info (width/height/fps/duration/codecs). (5) mediakit_sample_color — colour code at a frame position (chroma-key colour pickup; read-only). Results include input_format/output_format and a processing block (filters applied + full ffmpeg command). Registered once in ~/.codex/config.toml, shared by the Codex CLI and App.
 ---
 
 # gospelo-mediakit (Codex flavour)
@@ -18,6 +18,8 @@ call them. Do **not** re-implement ffmpeg/OpenCV inline.
   original frame" -> `mediakit_color_match` (pass video_path + reference_image)
 - "what resolution / fps / duration is this clip?", "does it have audio?"
   -> `mediakit_probe` (read-only, pass video_path)
+- "what colour is this spot / the blue-screen background?"
+  -> `mediakit_sample_color` (read-only; media_path + time_seconds + x/y)
 
 ## One-time setup
 

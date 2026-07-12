@@ -225,6 +225,20 @@ uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-
 > sequence settings or telop sizing. Read-only ffprobe wrapper returning
 > `width`/`height`/`fps`/`nb_frames`/`duration_seconds`/codecs/audio info.
 
+### `mediakit_sample_color` — colour at a position in a frame
+
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `media_path` | (required) | Video or image file |
+| `time_seconds` | `0` | Frame time for videos (ignored for images) |
+| `x` / `y` | `0` | Pixel position (top-left origin) |
+| `region` | `1` | NxN box averaged from (x, y); 1 = exact pixel |
+
+> **Why:** read a chroma-key background colour before keying, check colour
+> drift at a spot, or verify a rendered frame. rgb24 conversion happens
+> BEFORE the crop so chroma subsampling cannot blur the sampled pixel.
+> Returns `rgb`, `hex`, frame size and the full ffmpeg command.
+
 ## Output details (for LLM integration)
 
 Both tools return enough information to explain and reproduce what they did:

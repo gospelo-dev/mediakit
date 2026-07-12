@@ -5,6 +5,7 @@ Exposes these tools:
   - mediakit_change_speed
   - mediakit_color_match
   - mediakit_probe
+  - mediakit_sample_color
 
 Each tool is a **thin wrapper** (~20 lines) over a ``gospelo_mediakit.core``
 function, run via ``asyncio.to_thread`` so the ffmpeg subprocess never blocks
@@ -33,6 +34,7 @@ from gospelo_mediakit.core.color_match import color_match
 from gospelo_mediakit.core.errors import MediakitError
 from gospelo_mediakit.core.ffmpeg import probe
 from gospelo_mediakit.core.frames import extract_endframes
+from gospelo_mediakit.core.sample_color import sample_color
 from gospelo_mediakit.core.speed import change_speed
 
 mcp = FastMCP("gospelo-mediakit")
@@ -225,6 +227,50 @@ async def mediakit_probe(video_path: str) -> dict[str, Any]:
     return {"ok": True, "path": path, **info}
 
 
+@mcp.tool()
+async def mediakit_sample_color(
+    media_path: str,
+    time_seconds: float = 0.0,
+    x: int = 0,
+    y: int = 0,
+    region: int = 1,
+) -> dict[str, Any]:
+    """Get the colour code at a position in a frame of a video or image.
+
+    **Call this tool** when you need a pixel's colour — e.g. reading a
+    chroma-key background colour (blue/green screen) before keying, checking
+    colour drift at a spot, or verifying a rendered frame's colour. Works on
+    videos (frame picked by ``time_seconds``) and still images. Read-only,
+    ffmpeg only.
+
+    Args:
+        media_path: Video or image file.
+        time_seconds: Frame time for videos (ignored for images).
+        x / y: Pixel position (top-left origin). Use ``mediakit_probe`` for
+            the frame size.
+        region: Sample an NxN box from (x, y) and return its average
+            (1 = exact pixel; a small region like 4-16 is robust against
+            compression noise).
+
+    Returns:
+        On success: ``{"ok": true, "rgb": [r, g, b], "hex": "#RRGGBB",
+        "x", "y", "region", "time_seconds", "frame_width", "frame_height",
+        "command"}``.
+        On failure: ``{"ok": false, "error": "<message>"}``.
+    """
+    try:
+        return await asyncio.to_thread(
+            sample_color,
+            media_path=media_path,
+            time_seconds=time_seconds,
+            x=x,
+            y=y,
+            region=region,
+        )
+    except MediakitError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def _run_cli() -> int:
     """Run a single tool from the command line (one-shot).
 
@@ -246,6 +292,7 @@ def _run_cli() -> int:
             "mediakit_change_speed",
             "mediakit_color_match",
             "mediakit_probe",
+            "mediakit_sample_color",
         ],
     )
     parser.add_argument("--json", default="{}", help="JSON-encoded argument map for the tool.")
@@ -258,7 +305,15 @@ def _run_cli() -> int:
         return 2
 
     try:
-        if args.tool == "mediakit_probe":
+        if args.tool == "mediakit_sample_color":
+            result = sample_color(
+                media_path=kwargs.get("media_path", ""),
+                time_seconds=float(kwargs.get("time_seconds", 0.0)),
+                x=int(kwargs.get("x", 0)),
+                y=int(kwargs.get("y", 0)),
+                region=int(kwargs.get("region", 1)),
+            )
+        elif args.tool == "mediakit_probe":
             import os
 
             path = os.path.abspath(os.path.expanduser(kwargs.get("video_path", "")))

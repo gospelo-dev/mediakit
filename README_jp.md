@@ -214,6 +214,19 @@ uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-
 > 知りたいとき。読み取り専用の ffprobe ラッパーで、`width`/`height`/`fps`/
 > `nb_frames`/`duration_seconds`/コーデック/音声情報を返す。
 
+### `mediakit_sample_color` — フレーム内の指定位置のカラーコード取得
+
+| Arg | Default | 説明 |
+|-----|---------|------|
+| `media_path` | (必須) | 動画または画像ファイル |
+| `time_seconds` | `0` | 動画のフレーム時刻(画像では無視) |
+| `x` / `y` | `0` | ピクセル位置(左上原点) |
+| `region` | `1` | (x,y) からの NxN 平均。1 = 正確な1ピクセル |
+
+> **用途**: クロマキーのキーカラー取得、特定箇所の色ズレ確認、レンダリング結果の
+> 色検証。rgb24 変換を crop より先に行うため、クロマサブサンプリングの影響を
+> 受けない正確な値を返す。`rgb` / `hex` / フレームサイズ / ffmpeg コマンド全文を返す。
+
 ## 出力に含まれる情報(LLM 連携用)
 
 両ツールの返り値には、生成方法とフォーマットを説明・再現するための情報が入る:

@@ -1,7 +1,7 @@
 ---
 name: gospelo-mediakit
-description: AI 映像制作向けの動画ユーティリティ。(1) 最初/最後のフレームを png 等で書き出す mediakit_extract_frames、(2) 速度変更(4秒→1秒など。フレームレート維持・音声ピッチ/音量不変)の mediakit_change_speed、(3) 参照画像に色味を合わせる mediakit_color_match(AI 生成での青ズレ等をチャンネル平均マッチで補正)、(4) 画角・fps・コーデック等を返す mediakit_probe(読み取り専用)。実装は gospelo_mediakit パッケージ(配布物 gospelo-mediakit-mcp、ffmpeg ベースの決定論的処理)が持ち、Claude Code は .mcp.json 経由で MCP ツールとして直接呼ぶ。返り値に input_format/output_format と processing(適用フィルタ・ffmpeg コマンド全文)を含む。
-allowed-tools: mcp__gospelo-mediakit__mediakit_extract_frames mcp__gospelo-mediakit__mediakit_change_speed mcp__gospelo-mediakit__mediakit_color_match mcp__gospelo-mediakit__mediakit_probe Read Bash(ffmpeg:*) Bash(ffprobe:*)
+description: AI 映像制作向けの動画ユーティリティ。(1) 最初/最後のフレームを png 等で書き出す mediakit_extract_frames、(2) 速度変更(4秒→1秒など。フレームレート維持・音声ピッチ/音量不変)の mediakit_change_speed、(3) 参照画像に色味を合わせる mediakit_color_match(AI 生成での青ズレ等をチャンネル平均マッチで補正)、(4) 画角・fps・コーデック等を返す mediakit_probe(読み取り専用)、(5) フレーム内の指定位置のカラーコードを返す mediakit_sample_color(クロマキー色取得等・読み取り専用)。実装は gospelo_mediakit パッケージ(配布物 gospelo-mediakit-mcp、ffmpeg ベースの決定論的処理)が持ち、Claude Code は .mcp.json 経由で MCP ツールとして直接呼ぶ。返り値に input_format/output_format と processing(適用フィルタ・ffmpeg コマンド全文)を含む。
+allowed-tools: mcp__gospelo-mediakit__mediakit_extract_frames mcp__gospelo-mediakit__mediakit_change_speed mcp__gospelo-mediakit__mediakit_color_match mcp__gospelo-mediakit__mediakit_probe mcp__gospelo-mediakit__mediakit_sample_color Read Bash(ffmpeg:*) Bash(ffprobe:*)
 ---
 
 # gospelo-mediakit (Claude Code 版)
@@ -82,6 +82,12 @@ mediakit_change_speed {
 「この素材の画角/解像度は？」「fps は？」「長さは？」「音声ある？」で呼ぶ。
 読み取り専用。`{"video_path": "<ファイル>"}` だけで `width`/`height`/`fps`/
 `nb_frames`/`duration_seconds`/コーデック/音声情報を返す。
+
+### 色の取得 → `mediakit_sample_color`
+
+「この位置の色は？」「ブルーバックのキーカラーを調べて」で呼ぶ。読み取り専用。
+`{"media_path", "time_seconds", "x", "y", "region"}` で `rgb`/`hex` を返す
+(region>1 で NxN 平均、圧縮ノイズ対策)。
 
 ### 色味補正 → `mediakit_color_match`
 
