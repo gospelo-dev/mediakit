@@ -89,6 +89,84 @@ async def premiere_get_sequence_state(
 
 
 @mcp.tool()
+async def premiere_export_frame(
+    time_seconds: float | None = None,
+    output_dir: str | None = None,
+    file_name: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    include_reflection: bool = False,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Export one frame of the active Premiere sequence as a still image.
+
+    This is the visual (L2) observation: it lets an agent judge the picture
+    itself (color, framing, whether the intended clip is showing). The frame
+    time is passed to Premiere's exporter directly, so the playhead is never
+    moved; the project and timeline are not modified. Only a still-image file
+    is written.
+
+    Args:
+        time_seconds: Sequence time to export. Defaults to the current
+            playhead position.
+        output_dir: Directory the image is written into. Defaults to the
+            ``GOSPELO_PREMIERE_EXPORT_DIR`` environment variable if set
+            (configure it per MCP host next to the bridge token), else a
+            ``gospelo_premiere_frames`` folder under the system temp dir.
+        file_name: Image file name; the extension selects the format
+            (``.png`` default; Premiere also supports jpg/tif/tga/bmp/dpx/exr/gif).
+        width / height: Output size. Defaults to the sequence frame size.
+        include_reflection: Attach ``_reflect`` (available Exporter/TickTime
+            method names) to aid diagnosing API coverage. Off by default.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "outputFile": "...", "fileExists": true, ...}`` on
+        success; ``diagnostics`` lists any individual UXP calls that failed.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    import os
+    import tempfile
+
+    if output_dir is None:
+        output_dir = os.environ.get("GOSPELO_PREMIERE_EXPORT_DIR") or os.path.join(
+            tempfile.gettempdir(), "gospelo_premiere_frames"
+        )
+    output_dir = os.path.abspath(os.path.expanduser(output_dir))
+    os.makedirs(output_dir, exist_ok=True)
+
+    params: dict[str, Any] = {
+        "outputDir": output_dir,
+        "debug": include_reflection,
+    }
+    if time_seconds is not None:
+        params["timeSeconds"] = time_seconds
+    if file_name is not None:
+        params["fileName"] = file_name
+    if width is not None:
+        params["width"] = width
+    if height is not None:
+        params["height"] = height
+
+    try:
+        result = await _get_bridge().request(
+            "program.exportFrame",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        output_file = os.path.join(result.get("outputDir", output_dir), result.get("fileName", "frame.png"))
+        # The bridge and Premiere run on the same machine, so verify the file.
+        return {
+            "ok": True,
+            "outputFile": output_file,
+            "fileExists": os.path.isfile(output_file),
+            **result,
+        }
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

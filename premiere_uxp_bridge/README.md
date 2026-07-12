@@ -78,8 +78,11 @@ export GOSPELO_PREMIERE_BRIDGE_KEY="$HOME/.acme.sh/pr-bridge.gospelo.dev_ecc/pr-
 gospelo-premiere-mcp
 ```
 
-Other overrides: `GOSPELO_PREMIERE_BRIDGE_HOST` (default `127.0.0.1`) and
-`GOSPELO_PREMIERE_BRIDGE_PORT` (default `47653`).
+Other overrides: `GOSPELO_PREMIERE_BRIDGE_HOST` (default `127.0.0.1`),
+`GOSPELO_PREMIERE_BRIDGE_PORT` (default `47653`), and
+`GOSPELO_PREMIERE_EXPORT_DIR` (default directory that
+`premiere_export_frame` writes still images into; falls back to a
+`gospelo_premiere_frames` folder under the system temp dir).
 
 ### 4. Load the panel and connect
 

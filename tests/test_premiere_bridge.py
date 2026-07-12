@@ -116,6 +116,45 @@ def test_sequence_state_round_trip():
     asyncio.run(run())
 
 
+def test_export_frame_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "program.exportFrame",
+                {"outputDir": "/tmp/frames", "timeSeconds": 12.5, "debug": False},
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "program.exportFrame"
+        assert request["params"]["outputDir"] == "/tmp/frames"
+        assert request["params"]["timeSeconds"] == 12.5
+
+        payload = {
+            "outputDir": "/tmp/frames",
+            "fileName": "frame.png",
+            "width": 1920,
+            "height": 1080,
+            "timeResolved": True,
+            "exportReturn": True,
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["fileName"] == "frame.png"
+        assert result["width"] == 1920
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()

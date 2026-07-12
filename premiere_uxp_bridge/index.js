@@ -73,6 +73,8 @@ function connect() {
         result = await listProjectAssets(Boolean(params.includeBins));
       } else if (message.method === "sequence.getState") {
         result = await getSequenceState(Boolean(params.debug));
+      } else if (message.method === "program.exportFrame") {
+        result = await exportProgramFrame(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -316,6 +318,83 @@ async function getSequenceState(includeReflection) {
   }
 
   return state;
+}
+
+// ---- program.exportFrame (L2 visual observation) ----------------------------
+// Exports one frame of the active sequence as a still image, so an agent can
+// judge the picture itself (color, framing). Read-only: the frame time is
+// passed to the exporter directly; the playhead is never moved. The exact
+// Exporter/TickTime API surface varies by version, so calls are wrapped the
+// same way as sequence.getState, and debug=true attaches _reflect.
+
+async function exportProgramFrame(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) {
+    throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  }
+  if (!params.outputDir || typeof params.outputDir !== "string") {
+    throw new Error("outputDir (absolute directory path) is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  // Frame time: explicit seconds, else the current playhead. No seeking.
+  let time = null;
+  if (params.timeSeconds !== undefined && params.timeSeconds !== null) {
+    time = await safe(
+      "TickTime.createWithSeconds",
+      async () => ppro.TickTime.createWithSeconds(Number(params.timeSeconds)),
+      null,
+    );
+  } else {
+    time = await safe("sequence.getPlayerPosition", async () => await sequence.getPlayerPosition(), null);
+  }
+
+  // Frame size: explicit, else the sequence's own size.
+  let width = params.width || null;
+  let height = params.height || null;
+  if (!width || !height) {
+    const size = await safe("sequence.getFrameSize", async () => await sequence.getFrameSize(), null);
+    if (size) {
+      width = width || size.width;
+      height = height || size.height;
+    }
+  }
+
+  const fileName = typeof params.fileName === "string" && params.fileName ? params.fileName : "frame.png";
+  const result = {
+    outputDir: params.outputDir,
+    fileName,
+    width,
+    height,
+    timeResolved: time !== null,
+    exportReturn: null,
+    diagnostics,
+  };
+
+  if (params.debug) {
+    result._reflect = {
+      exporter: reflectMethods(ppro.Exporter),
+      tickTime: reflectMethods(ppro.TickTime),
+      time: reflectMethods(time),
+    };
+  }
+
+  if (time === null || !width || !height) {
+    // Return what we learned instead of throwing, so the first live run
+    // reveals the real API via diagnostics/_reflect.
+    return result;
+  }
+
+  result.exportReturn = await safe(
+    "Exporter.exportSequenceFrame",
+    async () => await ppro.Exporter.exportSequenceFrame(sequence, time, fileName, params.outputDir, width, height),
+    null,
+  );
+  return result;
 }
 
 entrypoints.setup({
