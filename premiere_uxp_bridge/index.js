@@ -135,6 +135,8 @@ function connect() {
         result = await importCaptions(params);
       } else if (message.method === "sequence.insertMogrt") {
         result = await insertMogrt(params);
+      } else if (message.method === "project.importMedia") {
+        result = await importMedia(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -742,6 +744,46 @@ function onForget() {
   }
   forgetToken();
   setStatus("Token forgotten. Enter a bridge token to connect.");
+}
+
+// ---- project.importMedia (add media files to the active project) ------------
+// Imports files into the active project's root bin via project.importFiles.
+// The project bin is modified; the timeline is NOT touched (unlike
+// sequence.insertClip). New items are identified by a root-item ID diff so the
+// caller can chain insertClip with the returned IDs.
+
+async function importMedia(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  if (!Array.isArray(params.paths) || params.paths.length === 0) {
+    throw new Error("paths (array of absolute media file paths) is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const beforeIds = (await safe("listRootItemIds(before)", async () => await listRootItemIds(project), [])) || [];
+  const imported = await safe(
+    "project.importFiles",
+    async () => await project.importFiles(params.paths, true),
+    false,
+  );
+  const afterIds = (await safe("listRootItemIds(after)", async () => await listRootItemIds(project), [])) || [];
+  const newIds = afterIds.filter((id) => !beforeIds.includes(id));
+
+  // Name the new items so the caller can map IDs to files.
+  const newItems = [];
+  for (const id of newIds) {
+    const item = await safe(`findProjectItemById(${id})`, async () => await findProjectItemById(project, id), null);
+    newItems.push({ id, name: item ? await safe("item.name", async () => ppro.ProjectItem.cast(item).name, null) : null });
+  }
+
+  return {
+    imported: Boolean(imported),
+    requestedCount: params.paths.length,
+    newItems,
+    diagnostics,
+  };
 }
 
 // ---- sequence.importCaptions (SRT -> caption track) --------------------------

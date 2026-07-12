@@ -299,6 +299,41 @@ def test_import_captions_round_trip():
     asyncio.run(run())
 
 
+def test_import_media_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "project.importMedia",
+                {"paths": ["/tmp/a.mp4", "/tmp/b.mp4"]},
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "project.importMedia"
+        assert request["params"]["paths"] == ["/tmp/a.mp4", "/tmp/b.mp4"]
+
+        payload = {
+            "imported": True,
+            "requestedCount": 2,
+            "newItems": [{"id": "i1", "name": "a.mp4"}, {"id": "i2", "name": "b.mp4"}],
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["imported"] is True
+        assert len(result["newItems"]) == 2
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()

@@ -495,6 +495,45 @@ async def premiere_add_telops(
 
 
 @mcp.tool()
+async def premiere_import_media(
+    paths: list[str],
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Import media files into the active Premiere project's root bin (WRITE).
+
+    Adds the files to the project bin only — the timeline is not touched.
+    Chain with ``premiere_insert_clip`` using the returned item IDs to place
+    the imported media on the sequence. Source files are referenced, never
+    modified or copied.
+
+    Args:
+        paths: Absolute media file paths (existence is validated here).
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "imported": true, "requestedCount": N,
+        "newItems": [{"id", "name"}, ...], "diagnostics": [...]}``.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    import os
+
+    resolved = [os.path.abspath(os.path.expanduser(p)) for p in paths]
+    missing = [p for p in resolved if not os.path.isfile(p)]
+    if missing:
+        return {"ok": False, "error": f"files not found: {missing}"}
+
+    try:
+        result = await _get_bridge().request(
+            "project.importMedia",
+            {"paths": resolved},
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 
