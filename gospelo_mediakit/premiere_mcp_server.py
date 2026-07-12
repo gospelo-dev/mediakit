@@ -683,6 +683,123 @@ async def premiere_set_audio_track_mute(
 
 
 @mcp.tool()
+async def premiere_trim_clip(
+    item_start_seconds: float,
+    track_type: str = "video",
+    track_index: int = 0,
+    in_seconds: float | None = None,
+    out_seconds: float | None = None,
+    close_gap: bool = False,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Trim a clip's in/out points on the active sequence (WRITE).
+
+    Premiere's API has no razor, but "cut at T and delete the head" is
+    equivalent to trimming: set ``in_seconds`` to T. Head-trim semantics are
+    the UI's left-edge trim (live-verified): the clip's start moves right
+    with the in point, leaving a gap before it. Pass ``close_gap=True`` to
+    also move the clip back to its original start (ripple-delete equivalent
+    for the clip). The close is a second transaction inside the same call —
+    live testing showed a single composed transaction is rejected with
+    "Invalid parameter" because actions validate against the pre-transaction
+    state — so undoing fully takes two undos. The response includes the
+    OBSERVED before/after start/end/in/out and ``gapClosed``.
+
+    Args:
+        item_start_seconds: Current start time of the clip to trim.
+        track_type: ``"video"`` or ``"audio"``.
+        track_index: 0-based track index.
+        in_seconds: New in point (trims the head).
+        out_seconds: New out point (trims the tail).
+        close_gap: After a head trim, move the clip back to its original
+            start (second transaction in the same call; two undos total).
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "trimmed": true, "before": {...}, "after": {...}}``
+        with start/end/in/out seconds in both. On failure returns
+        ``{"ok": false, "error": "..."}``.
+    """
+    params: dict[str, Any] = {
+        "trackType": track_type,
+        "trackIndex": track_index,
+        "itemStartSeconds": item_start_seconds,
+        "toleranceSeconds": tolerance_seconds,
+    }
+    if in_seconds is not None:
+        params["inSeconds"] = in_seconds
+    if out_seconds is not None:
+        params["outSeconds"] = out_seconds
+    if close_gap:
+        params["closeGap"] = True
+
+    try:
+        result = await _get_bridge().request(
+            "sequence.trimClip",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_ripple_delete_head(
+    cut_sequence_seconds: float,
+    item_start_seconds: float,
+    track_type: str = "video",
+    track_index: int = 0,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Cut a clip at a timeline position and ripple-delete the head (WRITE).
+
+    The clip is trimmed at ``cut_sequence_seconds`` (timeline time, converted
+    to the source in-point internally) and then moved back to its original
+    start so no gap remains — the ripple-delete a user performs with razor +
+    delete + close gap, as one MCP call. Executed as two transactions inside
+    the call (a single composed transaction is rejected by Premiere's
+    pre-transaction validation), so a full undo takes two undos.
+
+    Linked audio/video pairs do NOT follow (live-verified): apply the same
+    call to the paired track to keep A/V in sync.
+
+    Args:
+        cut_sequence_seconds: Timeline position of the cut; everything of the
+            clip before this time is removed.
+        item_start_seconds: Current start time of the clip to cut.
+        track_type: ``"video"`` or ``"audio"``.
+        track_index: 0-based track index.
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "trimmed": true, "gapClosed": true, "before": {...},
+        "after": {...}}`` with observed start/end/in/out seconds.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "sequence.trimClip",
+            {
+                "trackType": track_type,
+                "trackIndex": track_index,
+                "itemStartSeconds": item_start_seconds,
+                "cutSequenceSeconds": cut_sequence_seconds,
+                "closeGap": True,
+                "toleranceSeconds": tolerance_seconds,
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

@@ -337,6 +337,37 @@ L1 状態が予測したとおり該当時刻のクリップ（`misaki_9_colorma
 
 ---
 
+## premiere_trim_clip / premiere_ripple_delete_head（write）
+
+クリップのトリムと、その応用のリップル削除（`sequence.trimClip`）。
+Premiere の API に**レザー（カット）は存在しない**が、「T でカットして前半/後半を
+削除」はエッジトリムと等価であることを利用する。
+
+- `premiere_trim_clip(item_start_seconds, in_seconds?, out_seconds?, close_gap?)`:
+  汎用トリム。実機で確定したセマンティクス: `createSetInPointAction` は
+  **UI の左端トリムと同じ**（start がイン点と一緒に右へ動き end 固定 →
+  手前にギャップが残る）
+- `premiere_ripple_delete_head(cut_sequence_seconds, item_start_seconds, ...)`:
+  **タイムライン時刻**でカット位置を指定（ソースのイン点への換算は UXP 側で
+  実施）し、トリム後に元の開始位置へ詰めるまでを 1 コールで実行。
+  レザー＋前半削除＋ギャップクローズ相当
+
+**実装上の重要点（実機で確定）**:
+
+- トリムと詰め移動を**1 トランザクションに合成すると `Invalid parameter` で拒否**
+  される（アクション生成時の検証がトランザクション適用前の状態に対して走り、
+  詰め移動が「負の位置」と判定されるため）。そのため同一コール内の
+  **2 トランザクション**で実行 — 完全に取り消すには Undo 2 回
+- リンクされた A/V ペアは追従しないため、同期維持には映像・音声それぞれに
+  同じ呼び出しを行う
+
+**検証結果**: V1/A1 とも `cut=3.1875s`（00:00:03:03 @16fps）で実行し、
+両者が `start=0 / in=3.1875 / end=1645.875` に完全一致（A/V 同期維持）。
+diagnostics 0 件。失敗時の安全性も確認済み（合成トランザクション拒否時は
+全ロールバックされ before == after）。
+
+---
+
 ## premiere_set_video_track_output / premiere_set_audio_track_mute（write）
 
 トラックの出力状態を切り替える 2 ツール。どちらも同じブリッジメソッド
@@ -431,6 +462,8 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_add_marker` | `sequence.addMarker` | write（取り消し可能） |
 | `premiere_import_media` | `project.importMedia` | write（ビンへの追加のみ） |
 | `premiere_move_clip` | `sequence.moveClip` | write（取り消し可能・垂直移動は clone+remove 合成） |
+| `premiere_trim_clip` | `sequence.trimClip` | write（エッジトリム・応答に before/after） |
+| `premiere_ripple_delete_head` | `sequence.trimClip`（closeGap） | write（カット＋前半削除＋詰めを1コール） |
 | `premiere_set_video_track_output` | `sequence.setTrackMute`（video） | write（目アイコン相当・応答に before/after） |
 | `premiere_set_audio_track_mute` | `sequence.setTrackMute`（audio） | write（M ボタン相当・応答に before/after） |
 | `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |

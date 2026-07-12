@@ -141,6 +141,8 @@ function connect() {
         result = await moveClip(params);
       } else if (message.method === "sequence.setTrackMute") {
         result = await setTrackMute(params);
+      } else if (message.method === "sequence.trimClip") {
+        result = await trimClip(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -962,6 +964,154 @@ async function moveClip(params) {
     "Gospelo bridge: move clip across tracks",
     diagnostics,
   );
+  return result;
+}
+
+// ---- sequence.trimClip (adjust a clip's in/out points) ------------------------
+// Premiere's API has no razor, but "cut at T and drop the head/tail" is
+// equivalent to trimming the clip edge. createSetInPointAction /
+// createSetOutPointAction semantics are undocumented, so the response
+// includes the observed before/after (start/end/in/out) — callers judge the
+// outcome from the observation, and can follow up with sequence.moveClip.
+
+async function readItemTimes(item, safe) {
+  return {
+    startSeconds: await safe("getStartTime", async () => tickTimeToSeconds(await item.getStartTime()), null),
+    endSeconds: await safe("getEndTime", async () => tickTimeToSeconds(await item.getEndTime()), null),
+    inSeconds: await safe("getInPoint", async () => tickTimeToSeconds(await item.getInPoint()), null),
+    outSeconds: await safe("getOutPoint", async () => tickTimeToSeconds(await item.getOutPoint()), null),
+  };
+}
+
+async function trimClip(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (params.itemStartSeconds === undefined || params.itemStartSeconds === null) {
+    throw new Error("itemStartSeconds is required (identifies the clip to trim).");
+  }
+  if (
+    (params.inSeconds === undefined || params.inSeconds === null) &&
+    (params.outSeconds === undefined || params.outSeconds === null) &&
+    (params.cutSequenceSeconds === undefined || params.cutSequenceSeconds === null)
+  ) {
+    throw new Error("Provide inSeconds, outSeconds, and/or cutSequenceSeconds.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const trackType = params.trackType === "audio" ? "audio" : "video";
+  const trackIndex = Number(params.trackIndex || 0);
+  const tolerance = params.toleranceSeconds !== undefined ? Number(params.toleranceSeconds) : 0.05;
+
+  const track = await safe(
+    `${trackType}Track(${trackIndex})`,
+    async () =>
+      trackType === "video" ? await sequence.getVideoTrack(trackIndex) : await sequence.getAudioTrack(trackIndex),
+    null,
+  );
+  if (!track) throw new Error(`Track not found: ${trackType}[${trackIndex}]`);
+
+  const items = (await safe("getTrackItems", async () => await getTrackItems(track), [])) || [];
+  let target = null;
+  const starts = [];
+  for (const item of items) {
+    const start = await safe("item.getStartTime", async () => tickTimeToSeconds(await item.getStartTime()), null);
+    starts.push(start);
+    if (start !== null && Math.abs(start - Number(params.itemStartSeconds)) <= tolerance) {
+      target = item;
+      break;
+    }
+  }
+  if (!target) {
+    throw new Error(
+      `No clip starting at ${params.itemStartSeconds}s (tolerance ${tolerance}s) on ${trackType}[${trackIndex}]. ` +
+        `Clip starts on that track: ${JSON.stringify(starts)}`,
+    );
+  }
+
+  const before = await readItemTimes(target, safe);
+
+  // cutSequenceSeconds: callers think in TIMELINE time ("cut at 00:03:03"),
+  // so convert to a source in-point here: newIn = in + (cut - start).
+  let inSeconds = params.inSeconds;
+  if (params.cutSequenceSeconds !== undefined && params.cutSequenceSeconds !== null) {
+    if (before.inSeconds === null || before.startSeconds === null) {
+      throw new Error("Could not read the clip's current times to convert cutSequenceSeconds.");
+    }
+    inSeconds = before.inSeconds + (Number(params.cutSequenceSeconds) - before.startSeconds);
+  }
+
+  const actions = [];
+  if (inSeconds !== undefined && inSeconds !== null) {
+    const inTime = await safe(
+      "TickTime.createWithSeconds(in)",
+      async () => ppro.TickTime.createWithSeconds(Number(inSeconds)),
+      null,
+    );
+    if (inTime) actions.push(() => target.createSetInPointAction(inTime));
+  }
+  if (params.outSeconds !== undefined && params.outSeconds !== null) {
+    const outTime = await safe(
+      "TickTime.createWithSeconds(out)",
+      async () => ppro.TickTime.createWithSeconds(Number(params.outSeconds)),
+      null,
+    );
+    if (outTime) actions.push(() => target.createSetOutPointAction(outTime));
+  }
+
+  const result = {
+    trimmed: false,
+    name: await safe("item.getName", async () => await target.getName(), null),
+    trackType,
+    trackIndex,
+    before,
+    after: null,
+    diagnostics,
+  };
+  if (actions.length === 0) return result;
+
+  result.trimmed = runTransaction(
+    project,
+    () => actions.map((build) => build()),
+    "Gospelo bridge: trim clip",
+    diagnostics,
+  );
+  result.after = await readItemTimes(target, safe);
+
+  // closeGap: a head trim moves the clip's start right (UI trim-left
+  // semantics). Move it back in a SECOND transaction based on the OBSERVED
+  // shift. (Composing both into one transaction fails with "Invalid
+  // parameter": action factories validate against the pre-transaction
+  // state, where the move-back would target a negative position.)
+  if (
+    params.closeGap &&
+    result.trimmed &&
+    before.startSeconds !== null &&
+    result.after &&
+    result.after.startSeconds !== null
+  ) {
+    const shift = result.after.startSeconds - before.startSeconds;
+    if (Math.abs(shift) > 1e-9) {
+      const backTime = await safe(
+        "TickTime.createWithSeconds(back)",
+        async () => ppro.TickTime.createWithSeconds(-shift),
+        null,
+      );
+      if (backTime) {
+        result.gapClosed = runTransaction(
+          project,
+          () => target.createMoveAction(backTime),
+          "Gospelo bridge: close trim gap",
+          diagnostics,
+        );
+        result.after = await readItemTimes(target, safe);
+      }
+    } else {
+      result.gapClosed = true;
+    }
+  }
   return result;
 }
 

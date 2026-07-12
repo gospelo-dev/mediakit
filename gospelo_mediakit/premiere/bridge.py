@@ -119,6 +119,7 @@ class PremiereBridge:
             "project.importMedia",
             "sequence.moveClip",
             "sequence.setTrackMute",
+            "sequence.trimClip",
         }
     )
 

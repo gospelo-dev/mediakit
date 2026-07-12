@@ -410,6 +410,51 @@ def test_set_track_mute_round_trip():
     asyncio.run(run())
 
 
+def test_trim_clip_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "sequence.trimClip",
+                {
+                    "trackType": "video",
+                    "trackIndex": 0,
+                    "itemStartSeconds": 0.0,
+                    "cutSequenceSeconds": 3.1875,
+                    "closeGap": True,
+                },
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "sequence.trimClip"
+        assert request["params"]["cutSequenceSeconds"] == 3.1875
+        assert request["params"]["closeGap"] is True
+
+        payload = {
+            "trimmed": True,
+            "gapClosed": True,
+            "name": "demo_base.mp4",
+            "before": {"startSeconds": 0, "endSeconds": 1649.0625, "inSeconds": 0, "outSeconds": 1649.0625},
+            "after": {"startSeconds": 0, "endSeconds": 1645.875, "inSeconds": 3.1875, "outSeconds": 1649.0625},
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["trimmed"] is True
+        assert result["gapClosed"] is True
+        assert result["after"]["inSeconds"] == 3.1875
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()
