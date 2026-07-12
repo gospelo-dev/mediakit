@@ -145,6 +145,14 @@ function connect() {
         result = await trimClip(params);
       } else if (message.method === "sequence.razorClip") {
         result = await razorClip(params);
+      } else if (message.method === "sequence.createSubsequence") {
+        result = await createSubsequenceFromItems(params);
+      } else if (message.method === "sequence.removeClip") {
+        result = await removeClip(params);
+      } else if (message.method === "sequence.setClipTransform") {
+        result = await setClipTransform(params);
+      } else if (message.method === "project.setActiveSequence") {
+        result = await setActiveSequence(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -1345,6 +1353,250 @@ async function razorClip(params) {
     ) <= tolerance &&
     Math.abs(Math.max(result.original.endSeconds, result.clone.endSeconds) - E) <= tolerance;
   return result;
+}
+
+// ---- PIP kit: createSubsequence / removeClip / setClipTransform ---------------
+
+async function findTrackItem(sequence, trackType, trackIndex, itemStartSeconds, tolerance, safe) {
+  const track = await safe(
+    `${trackType}Track(${trackIndex})`,
+    async () =>
+      trackType === "video" ? await sequence.getVideoTrack(trackIndex) : await sequence.getAudioTrack(trackIndex),
+    null,
+  );
+  if (!track) throw new Error(`Track not found: ${trackType}[${trackIndex}]`);
+  const items = (await safe("getTrackItems", async () => await getTrackItems(track), [])) || [];
+  const starts = [];
+  for (const item of items) {
+    const start = await safe("item.getStartTime", async () => tickTimeToSeconds(await item.getStartTime()), null);
+    starts.push(start);
+    if (start !== null && Math.abs(start - Number(itemStartSeconds)) <= tolerance) return item;
+  }
+  throw new Error(
+    `No clip starting at ${itemStartSeconds}s (tolerance ${tolerance}s) on ${trackType}[${trackIndex}]. ` +
+      `Clip starts: ${JSON.stringify(starts)}`,
+  );
+}
+
+// Create a child (nested) sequence from the given track items. The originals
+// stay on the timeline (combine with sequence.removeClip + sequence.insertClip
+// of the returned project item to complete a nest-in-place).
+async function createSubsequenceFromItems(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (!Array.isArray(params.items) || params.items.length === 0) {
+    throw new Error("items (array of {trackType, trackIndex, itemStartSeconds}) is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const tolerance = params.toleranceSeconds !== undefined ? Number(params.toleranceSeconds) : 0.05;
+
+  const beforeIds = (await safe("listRootItemIds(before)", async () => await listRootItemIds(project), [])) || [];
+
+  await safe("clearSelection", async () => await sequence.clearSelection(), null);
+  const selection = await safe("getSelection", async () => await sequence.getSelection(), null);
+  if (!selection) throw new Error("Could not obtain a selection object (see diagnostics).");
+  for (const spec of params.items) {
+    const item = await findTrackItem(
+      sequence,
+      spec.trackType === "audio" ? "audio" : "video",
+      Number(spec.trackIndex || 0),
+      Number(spec.itemStartSeconds || 0),
+      tolerance,
+      safe,
+    );
+    await safe("selection.addItem", async () => selection.addItem(item), null);
+  }
+  const selectionApplied = await safe("setSelection", async () => sequence.setSelection(selection), null);
+
+  const newSequence = await safe(
+    "createSubsequence",
+    async () => await sequence.createSubsequence(params.ignoreTrackTargeting !== false),
+    null,
+  );
+
+  const afterIds = (await safe("listRootItemIds(after)", async () => await listRootItemIds(project), [])) || [];
+  const newIds = afterIds.filter((id) => !beforeIds.includes(id));
+  const result = {
+    created: Boolean(newSequence),
+    selectionApplied,
+    newSequenceName: newSequence ? await safe("newSequence.name", async () => newSequence.name, null) : null,
+    newItemIds: newIds,
+    diagnostics,
+  };
+  if (params.debug && newSequence) {
+    result._reflect = { newSequence: reflectMethods(newSequence) };
+  }
+  return result;
+}
+
+// Remove one clip from the timeline (no ripple by default).
+async function removeClip(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (params.itemStartSeconds === undefined || params.itemStartSeconds === null) {
+    throw new Error("itemStartSeconds is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const trackType = params.trackType === "audio" ? "audio" : "video";
+  const trackIndex = Number(params.trackIndex || 0);
+  const tolerance = params.toleranceSeconds !== undefined ? Number(params.toleranceSeconds) : 0.05;
+
+  const target = await findTrackItem(sequence, trackType, trackIndex, params.itemStartSeconds, tolerance, safe);
+  const before = await readItemTimes(target, safe);
+  const name = await safe("item.getName", async () => await target.getName(), null);
+
+  await safe("clearSelection", async () => await sequence.clearSelection(), null);
+  const selection = await safe("getSelection", async () => await sequence.getSelection(), null);
+  if (!selection) throw new Error("Could not obtain a selection object (see diagnostics).");
+  await safe("selection.addItem", async () => selection.addItem(target), null);
+
+  const editor = await safe("SequenceEditor.getEditor", async () => ppro.SequenceEditor.getEditor(sequence), null);
+  const mediaType =
+    ppro.Constants && ppro.Constants.MediaType
+      ? trackType === "video"
+        ? ppro.Constants.MediaType.VIDEO
+        : ppro.Constants.MediaType.AUDIO
+      : null;
+  const removed = editor
+    ? runTransaction(
+        project,
+        () => editor.createRemoveItemsAction(selection, Boolean(params.ripple), mediaType, false),
+        "Gospelo bridge: remove clip",
+        diagnostics,
+      )
+    : false;
+  return { removed, name, before, trackType, trackIndex, diagnostics };
+}
+
+// Set a clip's Motion transform (position in sequence pixels, scale in %).
+// Reads the current values first so callers can calibrate units.
+async function setClipTransform(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (params.itemStartSeconds === undefined || params.itemStartSeconds === null) {
+    throw new Error("itemStartSeconds is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const trackType = params.trackType === "audio" ? "audio" : "video";
+  const trackIndex = Number(params.trackIndex || 0);
+  const tolerance = params.toleranceSeconds !== undefined ? Number(params.toleranceSeconds) : 0.05;
+
+  const target = await findTrackItem(sequence, trackType, trackIndex, params.itemStartSeconds, tolerance, safe);
+  const chain = await safe("getComponentChain", async () => await target.getComponentChain(), null);
+  if (!chain) throw new Error("Could not read the clip's component chain (see diagnostics).");
+
+  // Locate the Motion fixed effect by matchName (locale-independent).
+  let motion = null;
+  const count = (await safe("getComponentCount", async () => chain.getComponentCount(), 0)) || 0;
+  for (let i = 0; i < count; i++) {
+    const component = await safe(`getComponentAtIndex(${i})`, async () => chain.getComponentAtIndex(i), null);
+    if (!component) continue;
+    const matchName = await safe(`component[${i}].getMatchName`, async () => await component.getMatchName(), null);
+    if (matchName === "AE.ADBE Motion") {
+      motion = component;
+      break;
+    }
+  }
+  if (!motion) throw new Error("Motion component (AE.ADBE Motion) not found on the clip.");
+
+  const positionParam = await safe("getParam(0)", async () => motion.getParam(0), null); // 位置 / Position
+  const scaleParam = await safe("getParam(1)", async () => motion.getParam(1), null); // スケール / Scale
+
+  async function readParamValue(param, label) {
+    return await safe(`${label}.getStartValue`, async () => {
+      const keyframe = await param.getStartValue();
+      const value = keyframe && keyframe.value !== undefined ? keyframe.value : keyframe;
+      if (value && typeof value === "object" && "x" in value && "y" in value) return { x: value.x, y: value.y };
+      if (value && typeof value === "object" && "value" in value) return value.value;
+      return value;
+    }, null);
+  }
+
+  const result = {
+    applied: false,
+    name: await safe("item.getName", async () => await target.getName(), null),
+    positionBefore: positionParam ? await readParamValue(positionParam, "position") : null,
+    scaleBefore: scaleParam ? await readParamValue(scaleParam, "scale") : null,
+    positionAfter: null,
+    scaleAfter: null,
+    diagnostics,
+  };
+
+  const wantScale = params.scale !== undefined && params.scale !== null;
+  const wantPosition =
+    params.positionX !== undefined && params.positionX !== null && params.positionY !== undefined && params.positionY !== null;
+  if (!wantScale && !wantPosition) return result; // read-only call
+
+  result.applied = runTransaction(
+    project,
+    () => {
+      const actions = [];
+      if (wantScale && scaleParam) {
+        actions.push(scaleParam.createSetValueAction(scaleParam.createKeyframe(Number(params.scale)), true));
+      }
+      if (wantPosition && positionParam) {
+        const point = new ppro.PointF(Number(params.positionX), Number(params.positionY));
+        actions.push(positionParam.createSetValueAction(positionParam.createKeyframe(point), true));
+      }
+      return actions;
+    },
+    "Gospelo bridge: set clip transform",
+    diagnostics,
+  );
+
+  result.positionAfter = positionParam ? await readParamValue(positionParam, "positionAfter") : null;
+  result.scaleAfter = scaleParam ? await readParamValue(scaleParam, "scaleAfter") : null;
+  return result;
+}
+
+// ---- project.setActiveSequence (switch which sequence is active) --------------
+// Needed for nested-sequence workflows: tools operate on the ACTIVE sequence,
+// so fixing anything inside a nest means activating it first (and switching
+// back afterwards). Sequences are addressed by name; a miss lists what exists.
+
+async function setActiveSequence(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  if (!params.name || typeof params.name !== "string") {
+    throw new Error("name (sequence name) is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const sequences = (await safe("getSequences", async () => await project.getSequences(), [])) || [];
+  const names = [];
+  let target = null;
+  for (const sequence of sequences) {
+    const name = await safe("sequence.name", async () => sequence.name, null);
+    names.push(name);
+    if (name === params.name) target = sequence;
+  }
+  if (!target) {
+    throw new Error(`Sequence not found: ${JSON.stringify(params.name)}. Available: ${JSON.stringify(names)}`);
+  }
+
+  const activated = await safe("setActiveSequence", async () => await project.setActiveSequence(target), null);
+  const active = await safe("getActiveSequence", async () => await project.getActiveSequence(), null);
+  const activeName = active ? await safe("active.name", async () => active.name, null) : null;
+  return {
+    activated: Boolean(activated) || activeName === params.name,
+    activeSequenceName: activeName,
+    availableSequences: names,
+    diagnostics,
+  };
 }
 
 // ---- sequence.setTrackMute (mute/unmute a track) ------------------------------

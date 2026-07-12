@@ -856,6 +856,189 @@ async def premiere_razor_clip(
 
 
 @mcp.tool()
+async def premiere_create_subsequence(
+    items: list[dict[str, Any]],
+    ignore_track_targeting: bool = True,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Create a child (nested) sequence from the given clips (WRITE).
+
+    Selects the specified track items and calls Premiere's
+    ``createSubsequence``: a new sequence containing them appears in the
+    project bin. The originals stay on the timeline — to complete an
+    in-place nest, follow up with ``premiere_remove_clip`` on the originals
+    and ``premiere_insert_clip`` with the returned new item ID, then scale
+    it with ``premiere_set_clip_transform`` for picture-in-picture.
+
+    Args:
+        items: List of ``{"track_type": "video"|"audio", "track_index": int,
+            "item_start_seconds": float}`` identifying the clips to include.
+        ignore_track_targeting: Passed to createSubsequence (default True).
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "created": true, "newSequenceName": "...",
+        "newItemIds": ["..."]}``. On failure ``{"ok": false, "error": "..."}``.
+    """
+    specs = [
+        {
+            "trackType": item.get("track_type", "video"),
+            "trackIndex": item.get("track_index", 0),
+            "itemStartSeconds": item.get("item_start_seconds", 0.0),
+        }
+        for item in items
+    ]
+    try:
+        result = await _get_bridge().request(
+            "sequence.createSubsequence",
+            {
+                "items": specs,
+                "ignoreTrackTargeting": ignore_track_targeting,
+                "toleranceSeconds": tolerance_seconds,
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_remove_clip(
+    item_start_seconds: float,
+    track_type: str = "video",
+    track_index: int = 0,
+    ripple: bool = False,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Remove one clip from the active sequence's timeline (WRITE).
+
+    Single undoable transaction. The project bin item is untouched — only
+    the track item is removed. ``ripple=True`` also closes the gap by
+    shifting later clips (Premiere's ripple delete of one clip).
+
+    Args:
+        item_start_seconds: Current start time of the clip to remove.
+        track_type: ``"video"`` or ``"audio"``.
+        track_index: 0-based track index.
+        ripple: Shift later clips to close the gap.
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "removed": true, "name": "...", "before": {...}}``.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "sequence.removeClip",
+            {
+                "trackType": track_type,
+                "trackIndex": track_index,
+                "itemStartSeconds": item_start_seconds,
+                "ripple": ripple,
+                "toleranceSeconds": tolerance_seconds,
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_set_clip_transform(
+    item_start_seconds: float,
+    track_type: str = "video",
+    track_index: int = 0,
+    scale: float | None = None,
+    position_x: float | None = None,
+    position_y: float | None = None,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Set a clip's Motion transform: scale and/or position (WRITE).
+
+    Rewrites the Motion fixed effect's parameters (found by matchName
+    ``AE.ADBE Motion``, locale-independent) in one undoable transaction —
+    the core of picture-in-picture. The response includes the values read
+    BEFORE and AFTER the change, so the first call also calibrates the
+    units (position is expected in sequence pixels, scale in percent).
+    Call without scale/position to just read the current values.
+
+    Args:
+        item_start_seconds: Current start time of the clip.
+        track_type: ``"video"`` or ``"audio"``.
+        track_index: 0-based track index.
+        scale: New scale (percent, 100 = original size).
+        position_x / position_y: New position (both required together).
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "applied": true, "positionBefore": ..., "scaleBefore":
+        ..., "positionAfter": ..., "scaleAfter": ...}``.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    params: dict[str, Any] = {
+        "trackType": track_type,
+        "trackIndex": track_index,
+        "itemStartSeconds": item_start_seconds,
+        "toleranceSeconds": tolerance_seconds,
+    }
+    if scale is not None:
+        params["scale"] = scale
+    if position_x is not None:
+        params["positionX"] = position_x
+    if position_y is not None:
+        params["positionY"] = position_y
+
+    try:
+        result = await _get_bridge().request(
+            "sequence.setClipTransform",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_set_active_sequence(
+    name: str,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Switch the active sequence by name (WRITE, UI state only).
+
+    All sequence tools operate on the ACTIVE sequence, so working inside a
+    nested (child) sequence means activating it first and switching back to
+    the parent afterwards. A name miss returns the available sequence names.
+
+    Args:
+        name: Exact sequence name (e.g. from ``premiere_list_project_assets``
+            or a ``premiere_create_subsequence`` response).
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "activated": true, "activeSequenceName": "...",
+        "availableSequences": [...]}``. On failure ``{"ok": false, ...}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "project.setActiveSequence",
+            {"name": name},
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

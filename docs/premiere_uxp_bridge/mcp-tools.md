@@ -405,6 +405,47 @@ Premiere の API にレザーは存在しないため、検証済みプリミテ
 
 ---
 
+## PIP キット: create_subsequence / remove_clip / set_clip_transform / set_active_sequence（write）
+
+ネスト（子シーケンス化）とピクチャー・イン・ピクチャーを構成する 4 ツール。
+典型フロー（実機検証済み）:
+
+```
+① premiere_create_subsequence   対象クリップ群 → 子シーケンス（ビンに追加）
+② premiere_remove_clip × N      元クリップをタイムラインから除去（ripple 対応）
+③ premiere_insert_clip          子シーケンスの新 ID をネストクリップとして挿入
+④ premiere_set_clip_transform   スケール%・位置で PIP 化
+⑤ premiere_set_active_sequence  ネスト内部の修正が必要なら切り替えて操作 → 親へ復帰
+```
+
+- `premiere_create_subsequence(items=[{track_type, track_index, item_start_seconds}, …])`:
+  選択 → `createSubsequence`。**タイムラインは不変**（ビンに新シーケンス）。
+  戻り値の `newItemIds` を ③ にそのまま渡せる
+- `premiere_remove_clip(item_start_seconds, …, ripple?)`: トラックアイテムの除去
+  （ビンのアイテムは不変）
+- `premiere_set_clip_transform(item_start_seconds, …, scale?, position_x?, position_y?)`:
+  Motion 固定エフェクト（matchName `AE.ADBE Motion`、ロケール非依存）の
+  スケール/位置を書き換え。**引数なしで現在値の読み取りのみ**も可能で、
+  応答に before/after を含む。**Position は正規化座標**（0〜1、中央 = [0.5, 0.5]）
+  — ピクセルではない（実機で較正済み）。スケールは %（100 = 原寸）
+- `premiere_set_active_sequence(name)`: アクティブシーケンスの切り替え。
+  全ツールはアクティブシーケンスに作用するため、ネスト内部の操作に必須。
+  名前不一致時は存在するシーケンス名一覧を返す
+
+**実機で確定した注意点**:
+
+- **ネストは作成時のトラック表示状態を引き継ぐ**（親で非表示のトラックは
+  ネスト内でも非表示 → ⑤ で切り替えて `set_video_track_output` で修復）
+- Position にピクセル値を渡すと画面外へ飛ぶ（正規化座標であるため）。
+  ツールは変更前の値を返すので、初回呼び出しが単位の較正を兼ねる
+
+**検証結果**: bg.png（V2）+ misaki（V3）を子シーケンス化 → 元クリップ除去 →
+ネスト挿入 → スケール 30%・位置 (0.82, 0.18) → フレーム書き出しで
+「demo_base 全画面の右上に、bg の上に misaki が乗った PIP」を目視確認。
+diagnostics 全ステップ 0 件。
+
+---
+
 ## premiere_set_video_track_output / premiere_set_audio_track_mute（write）
 
 トラックの出力状態を切り替える 2 ツール。どちらも同じブリッジメソッド
@@ -502,6 +543,10 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_trim_clip` | `sequence.trimClip` | write（エッジトリム・応答に before/after） |
 | `premiere_ripple_delete_head` | `sequence.trimClip`（closeGap） | write（カット＋前半削除＋詰めを1コール） |
 | `premiere_razor_clip` | `sequence.razorClip` | write（1→2クリップ分割・戦略自動選択） |
+| `premiere_create_subsequence` | `sequence.createSubsequence` | write（子シーケンス作成・タイムライン不変） |
+| `premiere_remove_clip` | `sequence.removeClip` | write（取り消し可能・ripple 対応） |
+| `premiere_set_clip_transform` | `sequence.setClipTransform` | write（Motion スケール/位置・読み取り較正つき） |
+| `premiere_set_active_sequence` | `project.setActiveSequence` | write（UI 状態のみ・ネスト操作の鍵） |
 | `premiere_set_video_track_output` | `sequence.setTrackMute`（video） | write（目アイコン相当・応答に before/after） |
 | `premiere_set_audio_track_mute` | `sequence.setTrackMute`（audio） | write（M ボタン相当・応答に before/after） |
 | `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |

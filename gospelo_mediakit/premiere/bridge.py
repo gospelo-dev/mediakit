@@ -121,6 +121,10 @@ class PremiereBridge:
             "sequence.setTrackMute",
             "sequence.trimClip",
             "sequence.razorClip",
+            "sequence.createSubsequence",
+            "sequence.removeClip",
+            "sequence.setClipTransform",
+            "project.setActiveSequence",
         }
     )
 
