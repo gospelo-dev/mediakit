@@ -53,6 +53,42 @@ async def premiere_list_project_assets(
 
 
 @mcp.tool()
+async def premiere_get_sequence_state(
+    include_reflection: bool = False,
+    timeout_seconds: float = 20.0,
+) -> dict[str, Any]:
+    """Read the active Premiere sequence's structural state as JSON.
+
+    Returns the video/audio track layout, the clips on each track (name,
+    start/end/in/out in seconds, and media path where available), and the
+    playhead position. This is the primary read-only observation used by an
+    autonomous agent to judge whether an edit landed as intended. It never
+    changes the project, the timeline, or media files.
+
+    Args:
+        include_reflection: Attach ``_reflect`` (available UXP method names on
+            the sequence/track/track-item objects) to aid diagnosing API
+            coverage. Off by default.
+        timeout_seconds: Connection and response timeout (1–60 seconds).
+
+    Returns:
+        ``{"ok": true, "project": {...}, "sequence": {...}, "videoTracks": [...],
+        "audioTracks": [...], "diagnostics": [...]}`` on success. ``diagnostics``
+        lists any individual UXP calls that failed (empty when all succeeded).
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "sequence.getState",
+            {"debug": include_reflection},
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

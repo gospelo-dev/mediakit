@@ -84,6 +84,38 @@ def test_request_round_trip():
     asyncio.run(run())
 
 
+def test_sequence_state_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request("sequence.getState", {"debug": False}, timeout_seconds=1)
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "sequence.getState"
+        assert request["params"] == {"debug": False}
+
+        payload = {
+            "project": {"name": "Edit", "path": "/tmp/Edit.prproj"},
+            "sequence": {"name": "Seq 01", "playheadSeconds": 1.5},
+            "videoTracks": [{"index": 0, "kind": "video", "name": "V1", "items": []}],
+            "audioTracks": [],
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["sequence"]["name"] == "Seq 01"
+        assert result["videoTracks"][0]["name"] == "V1"
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()

@@ -67,10 +67,15 @@ function connect() {
       if (message.type !== "request" || typeof message.id !== "string") {
         throw new Error("Invalid bridge request.");
       }
-      if (message.method !== "project.assets.list") {
+      const params = message.params || {};
+      let result;
+      if (message.method === "project.assets.list") {
+        result = await listProjectAssets(Boolean(params.includeBins));
+      } else if (message.method === "sequence.getState") {
+        result = await getSequenceState(Boolean(params.debug));
+      } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
-      const result = await listProjectAssets(Boolean(message.params && message.params.includeBins));
       send({ type: "response", id: message.id, ok: true, result });
     } catch (error) {
       const requestId = safeRequestId(event.data);
@@ -175,6 +180,142 @@ async function safeMediaPath(clip) {
   } catch (_) {
     return null;
   }
+}
+
+// ---- sequence.getState (L1 structured observation) --------------------------
+// Premiere's UXP DOM method names vary by version and fail silently when wrong,
+// so every host-API call is wrapped: failures land in `diagnostics` (with the
+// exact error) instead of blanking the whole result. Pass debug=true to also
+// attach `_reflect` (available method names) so one live call reveals the real
+// API surface. This method is read-only.
+
+const TICKS_PER_SECOND = 254016000000;
+
+function tickTimeToSeconds(t) {
+  if (t == null) return null;
+  if (typeof t === "number") return t / TICKS_PER_SECOND;
+  if (typeof t.seconds === "number") return t.seconds;
+  if (typeof t.ticks === "number") return t.ticks / TICKS_PER_SECOND;
+  if (typeof t.ticks === "string") {
+    const n = Number(t.ticks);
+    if (!Number.isNaN(n)) return n / TICKS_PER_SECOND;
+  }
+  return null;
+}
+
+function makeSafe(diagnostics) {
+  return async (label, fn, fallback) => {
+    try {
+      return await fn();
+    } catch (error) {
+      diagnostics.push(`${label}: ${String((error && (error.message || error)) || error)}`);
+      return fallback;
+    }
+  };
+}
+
+function reflectMethods(obj) {
+  if (obj === null || obj === undefined) return null;
+  const names = new Set();
+  let proto = obj;
+  for (let depth = 0; depth < 3 && proto; depth++) {
+    for (const name of Object.getOwnPropertyNames(proto)) names.add(name);
+    proto = Object.getPrototypeOf(proto);
+  }
+  return Array.from(names).sort();
+}
+
+async function getTrackItems(track) {
+  const trackItemType = (ppro.Constants && ppro.Constants.TrackItemType) || {};
+  const clipType = trackItemType.CLIP !== undefined ? trackItemType.CLIP : 1;
+  return await track.getTrackItems(clipType, false);
+}
+
+async function readTrackItem(item, safe) {
+  const out = {};
+  // TrackItem exposes getName() (a method), unlike ProjectItem's name property.
+  out.name = await safe("item.getName", async () => await item.getName(), null);
+  out.startSeconds = await safe("item.getStartTime", async () => tickTimeToSeconds(await item.getStartTime()), null);
+  out.endSeconds = await safe("item.getEndTime", async () => tickTimeToSeconds(await item.getEndTime()), null);
+  out.inSeconds = await safe("item.getInPoint", async () => tickTimeToSeconds(await item.getInPoint()), null);
+  out.outSeconds = await safe("item.getOutPoint", async () => tickTimeToSeconds(await item.getOutPoint()), null);
+  out.mediaPath = await safe(
+    "item.projectItem.mediaPath",
+    async () => {
+      const projectItem = await item.getProjectItem();
+      if (!projectItem) return null;
+      return await ppro.ClipProjectItem.cast(projectItem).getMediaFilePath();
+    },
+    null,
+  );
+  return out;
+}
+
+async function readTrack(sequence, kind, index, safe) {
+  const getter = kind === "video" ? "getVideoTrack" : "getAudioTrack";
+  const out = { index, kind, name: null, items: [] };
+  const track = await safe(`${getter}(${index})`, async () => await sequence[getter](index), null);
+  if (!track) return out;
+  out.name = await safe(`${kind}Track[${index}].name`, async () => track.name, null);
+  const items = (await safe(`${kind}Track[${index}].getTrackItems`, async () => await getTrackItems(track), [])) || [];
+  for (const item of items) {
+    out.items.push(await readTrackItem(item, safe));
+  }
+  return out;
+}
+
+async function getSequenceState(includeReflection) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) {
+    throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const state = {
+    project: {
+      name: await safe("project.name", async () => project.name, null),
+      path: await safe("project.path", async () => project.path, null),
+    },
+    sequence: {
+      name: await safe("sequence.name", async () => sequence.name, null),
+      playheadSeconds: await safe(
+        "sequence.getPlayerPosition",
+        async () => tickTimeToSeconds(await sequence.getPlayerPosition()),
+        null,
+      ),
+    },
+    videoTracks: [],
+    audioTracks: [],
+    diagnostics,
+  };
+
+  const videoCount = await safe("sequence.getVideoTrackCount", async () => await sequence.getVideoTrackCount(), 0);
+  const audioCount = await safe("sequence.getAudioTrackCount", async () => await sequence.getAudioTrackCount(), 0);
+  state.sequence.videoTrackCount = videoCount;
+  state.sequence.audioTrackCount = audioCount;
+
+  for (let i = 0; i < videoCount; i++) {
+    state.videoTracks.push(await readTrack(sequence, "video", i, safe));
+  }
+  for (let i = 0; i < audioCount; i++) {
+    state.audioTracks.push(await readTrack(sequence, "audio", i, safe));
+  }
+
+  if (includeReflection) {
+    state._reflect = { sequence: reflectMethods(sequence) };
+    const firstTrack = await safe("reflect.getVideoTrack(0)", async () => (videoCount > 0 ? await sequence.getVideoTrack(0) : null), null);
+    state._reflect.track = reflectMethods(firstTrack);
+    if (firstTrack) {
+      const items = (await safe("reflect.getTrackItems", async () => await getTrackItems(firstTrack), [])) || [];
+      state._reflect.trackItem = reflectMethods(items[0]);
+    }
+  }
+
+  return state;
 }
 
 entrypoints.setup({

@@ -106,7 +106,7 @@ class BridgeConfig:
 class PremiereBridge:
     """Serve one authenticated Premiere UXP client and relay typed requests."""
 
-    _ALLOWED_METHODS = frozenset({"project.assets.list"})
+    _ALLOWED_METHODS = frozenset({"project.assets.list", "sequence.getState"})
 
     def __init__(self, config: BridgeConfig) -> None:
         self._config = config
