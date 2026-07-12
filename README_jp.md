@@ -204,6 +204,16 @@ uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-
 > `gain`/`offset` を全体に適用して戻す。**依存追加なし**。全体一律の補正なので、
 > 時間方向のドリフト(先頭と末尾でズレ量が違う場合)は補正しない。
 
+### `mediakit_probe` — メディア情報の取得(画角・fps・コーデック)
+
+| Arg | Default | 説明 |
+|-----|---------|------|
+| `video_path` | (必須) | 調べるメディアファイル(動画・音声どちらも可) |
+
+> **用途**: シーケンス設定やテロップサイズを決める前に素材の画角・fps・長さを
+> 知りたいとき。読み取り専用の ffprobe ラッパーで、`width`/`height`/`fps`/
+> `nb_frames`/`duration_seconds`/コーデック/音声情報を返す。
+
 ## 出力に含まれる情報(LLM 連携用)
 
 両ツールの返り値には、生成方法とフォーマットを説明・再現するための情報が入る:

@@ -215,6 +215,16 @@ uvx --from gospelo-mediakit-mcp gospelo-mediakit change-speed clip.mp4 --target-
 > per-channel `gain`/`offset` across the whole clip. Dependency-free. It is a
 > single global correction (matches the average); per-time drift is not corrected.
 
+### `mediakit_probe` — inspect a media file (frame size, fps, codecs)
+
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `video_path` | (required) | Media file to inspect (video or audio) |
+
+> **Why:** agents need a clip's dimensions / fps / duration before deciding
+> sequence settings or telop sizing. Read-only ffprobe wrapper returning
+> `width`/`height`/`fps`/`nb_frames`/`duration_seconds`/codecs/audio info.
+
 ## Output details (for LLM integration)
 
 Both tools return enough information to explain and reproduce what they did:

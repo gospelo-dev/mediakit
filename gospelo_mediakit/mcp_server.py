@@ -4,6 +4,7 @@ Exposes these tools:
   - mediakit_extract_frames
   - mediakit_change_speed
   - mediakit_color_match
+  - mediakit_probe
 
 Each tool is a **thin wrapper** (~20 lines) over a ``gospelo_mediakit.core``
 function, run via ``asyncio.to_thread`` so the ffmpeg subprocess never blocks
@@ -26,8 +27,11 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from pathlib import Path
+
 from gospelo_mediakit.core.color_match import color_match
 from gospelo_mediakit.core.errors import MediakitError
+from gospelo_mediakit.core.ffmpeg import probe
 from gospelo_mediakit.core.frames import extract_endframes
 from gospelo_mediakit.core.speed import change_speed
 
@@ -189,6 +193,38 @@ async def mediakit_color_match(
         return {"ok": False, "error": str(exc)}
 
 
+@mcp.tool()
+async def mediakit_probe(video_path: str) -> dict[str, Any]:
+    """Get a media file's format info: frame size, fps, duration, codecs.
+
+    **Call this tool** whenever you need a clip's dimensions (width/height),
+    frame rate, duration, or codec — e.g. to pick sequence settings, decide
+    telop font size, or check whether a clip has audio. Read-only; ffprobe
+    only, nothing is written.
+
+    Args:
+        video_path: Path to the media file (mp4, mov, mp3, wav, … anything
+            ffprobe reads).
+
+    Returns:
+        On success: ``{"ok": true, "path", "container", "duration_seconds",
+        "bit_rate", "size_bytes", "width", "height", "fps", "nb_frames",
+        "video_codec", "pix_fmt", "audio_codec", "sample_rate_hz",
+        "channels"}``. Video fields are null for audio-only files; audio
+        fields are null when there is no audio stream.
+        On failure: ``{"ok": false, "error": "<message>"}``.
+    """
+    import os
+
+    path = os.path.abspath(os.path.expanduser(video_path))
+    if not os.path.isfile(path):
+        return {"ok": False, "error": f"file not found: {path}"}
+    info = await asyncio.to_thread(probe, Path(path))
+    if not info:
+        return {"ok": False, "error": "ffprobe unavailable or could not read the file"}
+    return {"ok": True, "path": path, **info}
+
+
 def _run_cli() -> int:
     """Run a single tool from the command line (one-shot).
 
@@ -205,7 +241,12 @@ def _run_cli() -> int:
     parser = argparse.ArgumentParser(prog="gospelo-mediakit-mcp cli")
     parser.add_argument(
         "tool",
-        choices=["mediakit_extract_frames", "mediakit_change_speed", "mediakit_color_match"],
+        choices=[
+            "mediakit_extract_frames",
+            "mediakit_change_speed",
+            "mediakit_color_match",
+            "mediakit_probe",
+        ],
     )
     parser.add_argument("--json", default="{}", help="JSON-encoded argument map for the tool.")
     args = parser.parse_args(sys.argv[2:])
@@ -217,7 +258,20 @@ def _run_cli() -> int:
         return 2
 
     try:
-        if args.tool == "mediakit_color_match":
+        if args.tool == "mediakit_probe":
+            import os
+
+            path = os.path.abspath(os.path.expanduser(kwargs.get("video_path", "")))
+            if not os.path.isfile(path):
+                result = {"ok": False, "error": f"file not found: {path}"}
+            else:
+                info = probe(Path(path))
+                result = (
+                    {"ok": True, "path": path, **info}
+                    if info
+                    else {"ok": False, "error": "ffprobe unavailable or could not read the file"}
+                )
+        elif args.tool == "mediakit_color_match":
             result = color_match(
                 video_path=kwargs.get("video_path", ""),
                 reference_image=kwargs.get("reference_image", ""),
