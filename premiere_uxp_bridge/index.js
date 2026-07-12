@@ -534,11 +534,43 @@ async function exportProgramFrame(params) {
     return result;
   }
 
+  // solo_video_track: temporarily hide every OTHER video track (and unhide
+  // the solo track if needed), export, then ALWAYS restore the original
+  // mute states — all inside this one bridge call so callers cannot leave
+  // the timeline in a half-toggled state.
+  const solo =
+    params.soloVideoTrack !== undefined && params.soloVideoTrack !== null ? Number(params.soloVideoTrack) : null;
+  const toggled = [];
+  if (solo !== null) {
+    const trackCount = (await safe("getVideoTrackCount(solo)", async () => await sequence.getVideoTrackCount(), 0)) || 0;
+    result.soloVideoTrack = solo;
+    for (let i = 0; i < trackCount; i++) {
+      const track = await safe(`getVideoTrack(${i})`, async () => await sequence.getVideoTrack(i), null);
+      if (!track) continue;
+      const muted = await safe(`isMuted(${i})`, async () => await track.isMuted(), null);
+      const wantMuted = i !== solo;
+      if (muted !== null && muted !== wantMuted) {
+        const set = await safe(`setMute(${i},${wantMuted})`, async () => await track.setMute(wantMuted), null);
+        if (set !== null) toggled.push({ index: i, track, original: muted });
+      }
+    }
+    result.soloToggled = toggled.map((t) => t.index);
+  }
+
   result.exportReturn = await safe(
     "Exporter.exportSequenceFrame",
     async () => await ppro.Exporter.exportSequenceFrame(sequence, time, fileName, params.outputDir, width, height),
     null,
   );
+
+  if (toggled.length > 0) {
+    let restored = 0;
+    for (const t of toggled) {
+      const ok = await safe(`restoreMute(${t.index})`, async () => await t.track.setMute(t.original), null);
+      if (ok !== null) restored++;
+    }
+    result.soloRestored = restored === toggled.length;
+  }
   return result;
 }
 

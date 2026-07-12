@@ -95,6 +95,7 @@ async def premiere_export_frame(
     file_name: str | None = None,
     width: int | None = None,
     height: int | None = None,
+    solo_video_track: int | None = None,
     include_reflection: bool = False,
     timeout_seconds: float = 30.0,
 ) -> dict[str, Any]:
@@ -106,6 +107,12 @@ async def premiere_export_frame(
     moved; the project and timeline are not modified. Only a still-image file
     is written.
 
+    With ``solo_video_track`` the bridge temporarily hides every other video
+    track (track-output mute), exports, and ALWAYS restores the original
+    states within the same call — so you get a single track's picture without
+    leaving the timeline half-toggled. ``soloRestored: true`` in the response
+    confirms the restore.
+
     Args:
         time_seconds: Sequence time to export. Defaults to the current
             playhead position.
@@ -116,6 +123,8 @@ async def premiere_export_frame(
         file_name: Image file name; the extension selects the format
             (``.png`` default; Premiere also supports jpg/tif/tga/bmp/dpx/exr/gif).
         width / height: Output size. Defaults to the sequence frame size.
+        solo_video_track: 0-based video track index to isolate (all other
+            video tracks are hidden for the export, then restored).
         include_reflection: Attach ``_reflect`` (available Exporter/TickTime
             method names) to aid diagnosing API coverage. Off by default.
         timeout_seconds: Connection and response timeout (1-60 seconds).
@@ -147,6 +156,8 @@ async def premiere_export_frame(
         params["width"] = width
     if height is not None:
         params["height"] = height
+    if solo_video_track is not None:
+        params["soloVideoTrack"] = solo_video_track
 
     try:
         result = await _get_bridge().request(

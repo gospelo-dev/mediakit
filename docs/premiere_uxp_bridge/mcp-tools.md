@@ -159,6 +159,7 @@ write 系のテストは使い捨てプロジェクト（`premiere_create_projec
 | `output_dir` | str | 環境変数 → 一時フォルダ | 出力先。優先順位: 引数 > `GOSPELO_PREMIERE_EXPORT_DIR` > `<tmp>/gospelo_premiere_frames`。自動作成される |
 | `file_name` | str | `frame.png` | 拡張子で形式を選択（png / jpg / tif / tga / bmp / dpx / exr / gif） |
 | `width` / `height` | int | シーケンスのフレームサイズ | 出力解像度 |
+| `solo_video_track` | int | なし | 指定ビデオトラック**単体**の画を書き出す。他のビデオトラックを一時的に非表示（トラック出力ミュート）にして書き出し、**同一コール内で必ず元の状態へ復元**（応答の `soloToggled` / `soloRestored` で確認可能） |
 | `include_reflection` | bool | `false` | `_reflect`（Exporter / TickTime の利用可能メソッド一覧）を付加 |
 | `timeout_seconds` | float | `30.0` | 接続・応答タイムアウト（1〜60 秒） |
 
