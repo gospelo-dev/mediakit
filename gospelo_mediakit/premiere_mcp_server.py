@@ -534,6 +534,66 @@ async def premiere_import_media(
 
 
 @mcp.tool()
+async def premiere_move_clip(
+    item_start_seconds: float,
+    new_start_seconds: float,
+    track_type: str = "video",
+    track_index: int = 0,
+    new_track_index: int | None = None,
+    tolerance_seconds: float = 0.05,
+    include_reflection: bool = False,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Move an existing clip on the active sequence (WRITE).
+
+    Identifies the clip by its track and current start time (within
+    ``tolerance_seconds``). A same-track move is a single relative move
+    action; a cross-track move (``new_track_index`` given) is implemented as
+    clone-to-destination + remove-original in one atomic, undoable
+    transaction, since Premiere's API has no direct vertical move.
+
+    Live-verified caveat: a linked audio/video pair does NOT move together —
+    move the video and audio items separately, then verify with
+    ``premiere_get_sequence_state`` (act -> observe).
+
+    Args:
+        item_start_seconds: Current start time of the clip to move.
+        new_start_seconds: Destination start time.
+        track_type: ``"video"`` or ``"audio"``.
+        track_index: 0-based source track index (V2 is video/1).
+        new_track_index: Destination track index for a cross-track move.
+        tolerance_seconds: Start-time matching tolerance.
+        include_reflection: Attach ``_reflect`` diagnostics (cross-track only).
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "moved": true, "name", "fromSeconds", "toSeconds",
+        ...}``; on a miss the error lists the clip start times found on that
+        track. On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    params: dict[str, Any] = {
+        "trackType": track_type,
+        "trackIndex": track_index,
+        "itemStartSeconds": item_start_seconds,
+        "newStartSeconds": new_start_seconds,
+        "toleranceSeconds": tolerance_seconds,
+        "debug": include_reflection,
+    }
+    if new_track_index is not None:
+        params["newTrackIndex"] = new_track_index
+
+    try:
+        result = await _get_bridge().request(
+            "sequence.moveClip",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

@@ -117,6 +117,7 @@ class PremiereBridge:
             "sequence.importCaptions",
             "sequence.insertMogrt",
             "project.importMedia",
+            "sequence.moveClip",
         }
     )
 

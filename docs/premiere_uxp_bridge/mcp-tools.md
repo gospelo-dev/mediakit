@@ -278,6 +278,64 @@ L1 状態が予測したとおり該当時刻のクリップ（`misaki_9_colorma
 
 ---
 
+## premiere_import_media（write）
+
+メディアファイルを**アクティブプロジェクトのルートビンへ読み込む**
+（`project.importMedia`）。ビンのみ変更・タイムライン非接触・ソース非改変。
+新規アイテムは before/after の ID 差分で特定され `{id, name}` で返るため、
+そのまま `premiere_insert_clip` に連鎖できる。MCP 側で全パスの存在を検証。
+
+**引数**: `paths`（絶対パスのリスト・必須）, `timeout_seconds`（既定 45）
+
+**戻り値**（実測）: `{"ok": true, "imported": true, "requestedCount": 1, "newItems": [{"id": "…", "name": "misaki_0.mp4"}], "diagnostics": []}`
+
+**検証結果**: アクティブプロジェクトへ読み込み、アセット 3 → 4 件・新規 ID
+返却を観測確認。diagnostics 0 件。
+
+---
+
+## premiere_move_clip（write）
+
+アクティブシーケンス上の既存クリップを移動する（`sequence.moveClip`）。
+対象はトラック種別・トラック番号・現在の開始秒（許容誤差つき）で特定。
+
+- **時間移動（同一トラック）**: `trackItem.createMoveAction` — 実機で判明した
+  とおり引数は**移動量（オフセット）**のため、ツール側は「絶対時刻指定 →
+  内部でオフセット換算」する
+- **垂直移動（トラック間、`new_track_index` 指定時）**: 直接 API が存在しない
+  ため、`createCloneTrackItemAction`（垂直オフセット付き複製）＋
+  `createRemoveItemsAction`（元削除）を**単一トランザクション**で実行
+  （atomic・取り消し 1 回）。削除用の選択は `sequence.clearSelection()` →
+  `getSelection()` → `selection.addItem(item)` で構築し、ユーザーの選択状態を
+  巻き込まない
+
+**引数**:
+
+| 名前 | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `item_start_seconds` | float | 必須 | 対象クリップの現在の開始秒 |
+| `new_start_seconds` | float | 必須 | 移動先の開始秒 |
+| `track_type` | str | `video` | `video` / `audio` |
+| `track_index` | int | `0` | 元トラック（0 始まり） |
+| `new_track_index` | int | なし | 指定時はトラック間の垂直移動 |
+| `tolerance_seconds` | float | `0.05` | 開始秒の一致許容誤差 |
+| `timeout_seconds` | float | `30.0` | タイムアウト（1〜60 秒） |
+
+**戻り値**（実測）: `{"ok": true, "moved": true, "name": "misaki_0.mp4", "fromSeconds": 0, "toSeconds": 0, "offsetSeconds": 0, "trackType": "video", "trackIndex": 1, "newTrackIndex": 2, "trackDelta": 1, "diagnostics": []}`
+
+**検証結果**: 時間移動（V2 の 10s → 0s、オフセット -10 で正確に移動）と
+垂直移動（V2 → V3、A2 → A3 とも成功。移動先にクリップ・元トラックは空・
+他トラック無傷）を観測確認。diagnostics 0 件。
+
+**実証済みの注意点**:
+
+- **リンクされた A/V ペアは追従しない** — 片側だけ動かすと音ズレになるため、
+  映像と音声を**それぞれ**移動すること
+- 見つからない場合のエラーには、そのトラック上の全クリップの開始秒一覧が
+  含まれる（再試行の手がかり）
+
+---
+
 ## premiere_import_captions（write）
 
 SRT をプロジェクトへ読み込む（`sequence.importCaptions`）。タイムライン配置は
@@ -346,6 +404,8 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_create_project` | `project.create` | write（新規プロジェクト作成のみ） |
 | `premiere_insert_clip` | `sequence.insertClip` | write（取り消し可能） |
 | `premiere_add_marker` | `sequence.addMarker` | write（取り消し可能） |
+| `premiere_import_media` | `project.importMedia` | write（ビンへの追加のみ） |
+| `premiere_move_clip` | `sequence.moveClip` | write（取り消し可能・垂直移動は clone+remove 合成） |
 | `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |
 | `premiere_add_telops` | `sequence.insertMogrt`（キューごと） | write（取り消し可能・完全自動） |
 

@@ -334,6 +334,44 @@ def test_import_media_round_trip():
     asyncio.run(run())
 
 
+def test_move_clip_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "sequence.moveClip",
+                {"trackType": "video", "trackIndex": 1, "itemStartSeconds": 10.0, "newStartSeconds": 0.0},
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "sequence.moveClip"
+        assert request["params"]["newStartSeconds"] == 0.0
+
+        payload = {
+            "moved": True,
+            "name": "misaki_0.mp4",
+            "fromSeconds": 10.0,
+            "toSeconds": 0.0,
+            "trackType": "video",
+            "trackIndex": 1,
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["moved"] is True
+        assert result["toSeconds"] == 0.0
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()

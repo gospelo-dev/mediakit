@@ -137,6 +137,8 @@ function connect() {
         result = await insertMogrt(params);
       } else if (message.method === "project.importMedia") {
         result = await importMedia(params);
+      } else if (message.method === "sequence.moveClip") {
+        result = await moveClip(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -570,10 +572,14 @@ function runTransaction(project, buildAction, undoLabel, diagnostics) {
   // lockedAccess/executeTransaction take synchronous callbacks, and the
   // create*Action factories themselves throw "Requires locked access" unless
   // called INSIDE lockedAccess — so the action is built within the callback.
+  // buildAction may return a single action or an array (one atomic undo step).
   try {
     project.lockedAccess(() => {
       project.executeTransaction((compoundAction) => {
-        compoundAction.addAction(buildAction());
+        const built = buildAction();
+        for (const action of Array.isArray(built) ? built : [built]) {
+          compoundAction.addAction(action);
+        }
       }, undoLabel);
     });
     return true;
@@ -784,6 +790,145 @@ async function importMedia(params) {
     newItems,
     diagnostics,
   };
+}
+
+// ---- sequence.moveClip (reposition an existing track item) -------------------
+// Finds the clip on the given track whose start time matches itemStartSeconds
+// (within a small tolerance) and moves it via trackItem.createMoveAction as a
+// single undoable transaction. Whether a linked A/V pair moves together is
+// determined by Premiere itself; callers should verify with sequence.getState.
+
+async function moveClip(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (params.itemStartSeconds === undefined || params.itemStartSeconds === null) {
+    throw new Error("itemStartSeconds is required (identifies the clip to move).");
+  }
+  if (params.newStartSeconds === undefined || params.newStartSeconds === null) {
+    throw new Error("newStartSeconds is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const trackType = params.trackType === "audio" ? "audio" : "video";
+  const trackIndex = Number(params.trackIndex || 0);
+  const tolerance = params.toleranceSeconds !== undefined ? Number(params.toleranceSeconds) : 0.05;
+
+  const track = await safe(
+    `${trackType}Track(${trackIndex})`,
+    async () =>
+      trackType === "video" ? await sequence.getVideoTrack(trackIndex) : await sequence.getAudioTrack(trackIndex),
+    null,
+  );
+  if (!track) throw new Error(`Track not found: ${trackType}[${trackIndex}]`);
+
+  const items = (await safe("getTrackItems", async () => await getTrackItems(track), [])) || [];
+  let target = null;
+  let matchedStart = null;
+  const starts = [];
+  for (const item of items) {
+    const start = await safe("item.getStartTime", async () => tickTimeToSeconds(await item.getStartTime()), null);
+    starts.push(start);
+    if (start !== null && Math.abs(start - Number(params.itemStartSeconds)) <= tolerance) {
+      target = item;
+      matchedStart = start;
+      break;
+    }
+  }
+  if (!target) {
+    throw new Error(
+      `No clip starting at ${params.itemStartSeconds}s (tolerance ${tolerance}s) on ${trackType}[${trackIndex}]. ` +
+        `Clip starts on that track: ${JSON.stringify(starts)}`,
+    );
+  }
+
+  const name = await safe("item.getName", async () => await target.getName(), null);
+  // createMoveAction takes a RELATIVE offset (live-discovered: passing the
+  // absolute target committed fine but moved nothing when the offset happened
+  // to equal the current position delta of zero). Convert absolute -> offset.
+  const offsetSeconds = Number(params.newStartSeconds) - matchedStart;
+  const offsetTime = await safe(
+    "TickTime.createWithSeconds(offset)",
+    async () => ppro.TickTime.createWithSeconds(offsetSeconds),
+    null,
+  );
+  const result = {
+    moved: false,
+    name,
+    fromSeconds: matchedStart,
+    toSeconds: Number(params.newStartSeconds),
+    offsetSeconds,
+    trackType,
+    trackIndex,
+    diagnostics,
+  };
+  if (!offsetTime) return result;
+
+  // Same-track move: a plain relative move action.
+  if (params.newTrackIndex === undefined || Number(params.newTrackIndex) === trackIndex) {
+    result.moved = runTransaction(
+      project,
+      () => target.createMoveAction(offsetTime),
+      "Gospelo bridge: move clip",
+      diagnostics,
+    );
+    return result;
+  }
+
+  // Cross-track (vertical) move: no direct API exists, so clone the item to
+  // the destination track and remove the original in ONE transaction
+  // (atomic, single undo). Selection is needed for the remove action.
+  const trackDelta = Number(params.newTrackIndex) - trackIndex;
+  result.newTrackIndex = Number(params.newTrackIndex);
+  result.trackDelta = trackDelta;
+
+  const editor = await safe("SequenceEditor.getEditor", async () => ppro.SequenceEditor.getEditor(sequence), null);
+
+  // Build a selection containing ONLY our target. clearSelection first so a
+  // user's live selection can never leak into the remove action.
+  let selection = null;
+  await safe("sequence.clearSelection", async () => await sequence.clearSelection(), null);
+  selection = await safe("sequence.getSelection", async () => await sequence.getSelection(), null);
+  if (selection) {
+    const added =
+      (await safe("selection.addItem(target)", async () => (selection.addItem(target), true), null)) ||
+      (await safe("selection.addItem(target,false)", async () => (selection.addItem(target, false), true), null));
+    if (!added) selection = null;
+  }
+  if (params.debug) {
+    result._reflect = {
+      selection: reflectMethods(selection),
+      mediaTypeKeys: ppro.Constants && ppro.Constants.MediaType ? Object.keys(ppro.Constants.MediaType) : null,
+    };
+  }
+  if (!editor || !selection) return result;
+
+  const mediaType =
+    ppro.Constants && ppro.Constants.MediaType
+      ? trackType === "video"
+        ? ppro.Constants.MediaType.VIDEO
+        : ppro.Constants.MediaType.AUDIO
+      : null;
+
+  result.moved = runTransaction(
+    project,
+    () => [
+      editor.createCloneTrackItemAction(
+        target,
+        offsetTime,
+        trackType === "video" ? trackDelta : 0,
+        trackType === "audio" ? trackDelta : 0,
+        trackType === "video",
+        false, // overwrite at the destination, do not ripple-insert
+      ),
+      editor.createRemoveItemsAction(selection, false, mediaType, false),
+    ],
+    "Gospelo bridge: move clip across tracks",
+    diagnostics,
+  );
+  return result;
 }
 
 // ---- sequence.importCaptions (SRT -> caption track) --------------------------
