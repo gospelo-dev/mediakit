@@ -378,6 +378,123 @@ async def premiere_import_captions(
 
 
 @mcp.tool()
+async def premiere_add_telops(
+    srt_path: str,
+    template_path: str | None = None,
+    video_track_index: int = 2,
+    time_offset_seconds: float = 0.0,
+    max_cues: int | None = None,
+    timeout_seconds: float = 60.0,
+) -> dict[str, Any]:
+    """Place editable text telops for every SRT cue on the active sequence (WRITE).
+
+    Fully automatic pipeline: each SRT cue is baked into a text-patched copy
+    of a Motion Graphics template (fresh capsuleID per cue), inserted at the
+    cue's start time on the given video track, and trimmed to the cue's
+    duration. The resulting telops remain editable in Premiere's Essential
+    Graphics panel. This MODIFIES the timeline (each insertion is undoable).
+
+    Args:
+        srt_path: Subtitle file whose cues become telops (e.g. produced by
+            mlx-whisper).
+        template_path: ``.mogrt`` template to patch. Defaults to Premiere's
+            bundled "Simple Broadcast Caption" (resolved via the bridge's
+            installed-mogrt path).
+        video_track_index: Target video track (0-based; use a track above
+            the footage).
+        time_offset_seconds: Shift applied to every cue (align SRT time zero
+            with the audio's position on the timeline).
+        max_cues: Optional cap on the number of cues placed.
+        timeout_seconds: Per-request timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "placedCues": N, "totalCues": M, "results": [...]}``;
+        each result carries the cue text/time and the bridge response.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    import glob
+    import os
+    import tempfile
+
+    from gospelo_mediakit.premiere.mogrt import make_telop_mogrt
+    from gospelo_mediakit.premiere.srt import parse_srt
+
+    srt_path = os.path.abspath(os.path.expanduser(srt_path))
+    if not os.path.isfile(srt_path):
+        return {"ok": False, "error": f"srt file not found: {srt_path}"}
+    with open(srt_path, encoding="utf-8") as fh:
+        cues = parse_srt(fh.read())
+    if not cues:
+        return {"ok": False, "error": "no cues found in the srt file"}
+    if max_cues is not None:
+        cues = cues[: max(0, max_cues)]
+
+    bridge = _get_bridge()
+
+    try:
+        if template_path is None:
+            recon = await bridge.request("sequence.insertMogrt", {}, timeout_seconds=timeout_seconds)
+            installed = recon.get("installedMogrtPath")
+            if not installed or not os.path.isdir(installed):
+                return {"ok": False, "error": f"installed mogrt path not found: {installed}"}
+            preferred = os.path.join(installed, "Captions and Subtitles", "Simple Broadcast Caption.mogrt")
+            if os.path.isfile(preferred):
+                template_path = preferred
+            else:
+                candidates = sorted(glob.glob(os.path.join(installed, "**", "*.mogrt"), recursive=True))
+                if not candidates:
+                    return {"ok": False, "error": "no bundled .mogrt templates found"}
+                template_path = candidates[0]
+        template_path = os.path.abspath(os.path.expanduser(template_path))
+        if not os.path.isfile(template_path):
+            return {"ok": False, "error": f"template not found: {template_path}"}
+
+        work_dir = tempfile.mkdtemp(prefix="gospelo_telops_")
+        results: list[dict[str, Any]] = []
+        placed = 0
+        for index, cue in enumerate(cues):
+            # One text layer gets the cue text; a trailing "" blanks any
+            # additional text layers the template may have.
+            text = cue.text.replace("\n", " ").strip()
+            out_path = os.path.join(work_dir, f"telop_{index:04d}.mogrt")
+            make_telop_mogrt(template_path, [text, ""], out_path, new_name=f"Gospelo Telop {index + 1}")
+
+            response = await bridge.request(
+                "sequence.insertMogrt",
+                {
+                    "mogrtPath": out_path,
+                    "timeSeconds": cue.start_seconds + time_offset_seconds,
+                    "durationSeconds": cue.duration_seconds,
+                    "videoTrackIndex": video_track_index,
+                    "audioTrackIndex": 0,
+                },
+                timeout_seconds=timeout_seconds,
+            )
+            ok = bool(response.get("inserted"))
+            placed += 1 if ok else 0
+            results.append(
+                {
+                    "cue": index + 1,
+                    "text": text,
+                    "timeSeconds": cue.start_seconds + time_offset_seconds,
+                    "durationSeconds": cue.duration_seconds,
+                    "inserted": ok,
+                    "durationSet": response.get("durationSet"),
+                    "diagnostics": response.get("diagnostics", []),
+                }
+            )
+        return {
+            "ok": True,
+            "placedCues": placed,
+            "totalCues": len(cues),
+            "template": template_path,
+            "results": results,
+        }
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

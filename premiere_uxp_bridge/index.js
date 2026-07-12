@@ -985,8 +985,30 @@ async function insertMogrt(params) {
   result.inserted = true;
   result.itemCount = insertedItems.length;
 
-  // Inventory the component chain of the first (video) item to find the text param.
   const videoItem = insertedItems[0];
+
+  // Match the telop's on-screen duration to the caption cue: mogrt clips get
+  // a fixed default duration, so trim the end when durationSeconds is given.
+  if (params.durationSeconds !== undefined && params.durationSeconds !== null) {
+    const endTime = await safe(
+      "TickTime.createWithSeconds(end)",
+      async () =>
+        ppro.TickTime.createWithSeconds(Number(params.timeSeconds || 0) + Number(params.durationSeconds)),
+      null,
+    );
+    if (endTime) {
+      result.durationSet = runTransaction(
+        project,
+        () => videoItem.createSetEndAction(endTime),
+        "Gospelo bridge: set telop duration",
+        diagnostics,
+      );
+    } else {
+      result.durationSet = false;
+    }
+  }
+
+  // Inventory the component chain of the first (video) item to find the text param.
   const chain = await safe("getComponentChain", async () => await videoItem.getComponentChain(), null);
   if (!chain) return result;
 

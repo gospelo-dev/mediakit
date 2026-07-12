@@ -278,6 +278,60 @@ L1 状態が予測したとおり該当時刻のクリップ（`misaki_9_colorma
 
 ---
 
+## premiere_import_captions（write）
+
+SRT をプロジェクトへ読み込む（`sequence.importCaptions`）。タイムライン配置は
+Premiere の現行 UXP API がキャプションアイテムに対してサイレント no-op のため、
+`placed` は**キャプショントラック数の実測差分**で正直に判定される（false が
+期待値）。残る手動操作は「ビンからシーケンスへ 1 回ドラッグ」のみで、
+応答の `note` にも同じ案内が入る。ドラッグすると Premiere がキャプション
+トラックを生成し全キューを配置する（実機確認済み）。
+
+**検証結果**: `imported: true` / `placed: false` / note 付与。手動ドラッグ後、
+キャプショントラック C1 にキュー（0〜5.28s）が生成・表示された。
+
+---
+
+## premiere_add_telops（write・完全自動テロップ）
+
+SRT の**全キューを編集可能なテキストテロップとして自動配置**する
+オーケストレーション。キューごとに: ① 同梱 Motion Graphics テンプレートの
+テキストを差し替えた .mogrt を生成（`gospelo_mediakit/premiere/mogrt.py`、
+capsuleID を毎回新規化）→ ② `sequence.insertMogrt` でキュー開始時刻に挿入 →
+③ `createSetEndAction` でキューの長さにトリム。配置後も Essential Graphics で
+テキスト・スタイルとも編集可能（ffmpeg 焼き込みとの違い）。
+
+**引数**:
+
+| 名前 | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `srt_path` | str | 必須 | 字幕ファイル（mlx-whisper 等の出力） |
+| `template_path` | str | 同梱 Simple Broadcast Caption | 差し替え元の .mogrt |
+| `video_track_index` | int | `2` | 配置先ビデオトラック（0 始まり） |
+| `time_offset_seconds` | float | `0.0` | 全キューへ加算する時刻オフセット |
+| `max_cues` | int | なし | 配置キュー数の上限 |
+| `timeout_seconds` | float | `60.0` | リクエスト単位のタイムアウト |
+
+**戻り値**（実測）: `{"ok": true, "placedCues": 1, "totalCues": 1, "template": "…", "results": [{"cue": 1, "text": "…", "timeSeconds": 30.0, "durationSeconds": 5.28, "inserted": true, "durationSet": true, "diagnostics": []}]}`
+
+**検証結果**: mlx-whisper の実転写テキスト「こちらは（製品名）で最初に表示
+されるスケジュール画面になります」がテンプレートスタイル付きで指定時刻に描画
+されることをフレーム書き出しで確認。UXP 呼び出し失敗 0 件。
+
+**mogrt パッチ技法（`make_telop_mogrt`）で対処済みの罠**:
+
+1. Premiere は capsuleID で mogrt をキャッシュ（同一 ID の改変版はキャッシュ元が
+   描画される）→ 出力ごとに UUID 再生成
+2. prgraphic はロケール別・パラメータ名も翻訳済み → 名前でなく**構造**
+   （base64→UTF-16LE JSON に `mTextParam` を含むか）で全バリアントをパッチ
+3. ppro 製テンプレートの definition.json は `capsuleparams` でなく
+   `clientControls` → 両対応
+
+**既知の制限**: 長文はテンプレートのフォントサイズのままはみ出し得る
+（`mStyleSheet.mFontSize` も同じ構造にあるため、サイズ指定オプションで拡張可能）。
+
+---
+
 ## ブリッジ allowlist との対応
 
 Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド allowlist で
@@ -292,6 +346,8 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_create_project` | `project.create` | write（新規プロジェクト作成のみ） |
 | `premiere_insert_clip` | `sequence.insertClip` | write（取り消し可能） |
 | `premiere_add_marker` | `sequence.addMarker` | write（取り消し可能） |
+| `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |
+| `premiere_add_telops` | `sequence.insertMogrt`（キューごと） | write（取り消し可能・完全自動） |
 
 新しい操作は、UXP ハンドラと Python allowlist の**両方**に明示的に追加した
 もののみ有効になる（任意コード実行は非対応・非方針）。
