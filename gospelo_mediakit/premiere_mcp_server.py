@@ -1207,6 +1207,75 @@ async def premiere_rename_item(
 
 
 @mcp.tool()
+async def premiere_add_effect(
+    item_start_seconds: float,
+    effect_query: str | None = None,
+    match_name: str | None = None,
+    color_hex: str | None = None,
+    existing: bool = False,
+    track_type: str = "video",
+    track_index: int = 0,
+    tolerance_seconds: float = 0.05,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Add a video effect to a clip, optionally setting a colour param (WRITE).
+
+    With ``existing=True`` the effect is looked up on the clip instead of
+    being appended again — use this to inspect or re-configure an
+    already-applied effect (e.g. adjust the key colour) without stacking
+    duplicates.
+
+    Uses Premiere's OFFICIAL VideoFilterFactory (not the unofficial QE DOM):
+    the effect is found by a display-name substring (``effect_query``, e.g.
+    ``"Ultra"`` for the Ultra Key chroma keyer) or an exact ``match_name``,
+    appended to the clip's component chain in an undoable transaction, and
+    its parameters are returned (index/displayName/current value).
+
+    ``color_hex`` (e.g. ``"#002FFA"`` from ``mediakit_sample_color``) sets
+    the effect's first colour-typed parameter — detected structurally — with
+    automatic value-range calibration (0-255 vs 0-1: set, read back, retry).
+
+    Args:
+        item_start_seconds: Current start time of the target clip.
+        effect_query: Display-name substring to find the effect.
+        match_name: Exact filter matchName (skips the lookup).
+        color_hex: Colour for the first colour parameter (chroma key colour).
+        track_type / track_index: Target track.
+        tolerance_seconds: Start-time matching tolerance.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "applied": true, "matchName": "...", "displayName":
+        "...", "params": [...], "colorSet": {...}}``.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    params: dict[str, Any] = {
+        "trackType": track_type,
+        "trackIndex": track_index,
+        "itemStartSeconds": item_start_seconds,
+        "toleranceSeconds": tolerance_seconds,
+    }
+    if effect_query is not None:
+        params["effectQuery"] = effect_query
+    if match_name is not None:
+        params["matchName"] = match_name
+    if color_hex is not None:
+        params["colorHex"] = color_hex
+    if existing:
+        params["existing"] = True
+
+    try:
+        result = await _get_bridge().request(
+            "sequence.addEffect",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

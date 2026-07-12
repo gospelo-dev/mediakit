@@ -161,6 +161,8 @@ function connect() {
         result = await saveProject(params);
       } else if (message.method === "project.renameItem") {
         result = await renameItem(params);
+      } else if (message.method === "sequence.addEffect") {
+        result = await addEffect(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -1618,12 +1620,19 @@ async function setActiveSequence(params) {
 }
 
 // Read one component-param value via its start keyframe (shared helper).
+// Native Color/PointF wrappers have non-enumerable properties (JSON shows
+// {}), so extract channels via explicit property access.
 async function readComponentParamValue(param, label, safe) {
   return await safe(`${label}.getStartValue`, async () => {
     const keyframe = await param.getStartValue();
-    const value = keyframe && keyframe.value !== undefined ? keyframe.value : keyframe;
-    if (value && typeof value === "object" && "x" in value && "y" in value) return { x: value.x, y: value.y };
-    if (value && typeof value === "object" && "value" in value) return value.value;
+    let value = keyframe && keyframe.value !== undefined ? keyframe.value : keyframe;
+    if (value && typeof value === "object" && "value" in value) value = value.value;
+    if (value && typeof value === "object") {
+      if (typeof value.red === "number" || typeof value.blue === "number") {
+        return { red: value.red, green: value.green, blue: value.blue, alpha: value.alpha, _type: "color" };
+      }
+      if (typeof value.x === "number" && typeof value.y === "number") return { x: value.x, y: value.y };
+    }
     return value;
   }, null);
 }
@@ -1684,6 +1693,170 @@ async function saveProject(params) {
     path: await safe("project.path", async () => project.path, null),
     diagnostics,
   };
+}
+
+// ---- sequence.addEffect (append a video filter and optionally set a colour) ---
+// Roadmap stage 4 via the OFFICIAL VideoFilterFactory (not the unofficial QE
+// DOM): the effect is resolved from the live getDisplayNames()/getMatchNames()
+// inventory, appended in a transaction, and its parameters are read back.
+// Colour parameters are detected structurally (value object with red/green/
+// blue) and set with automatic range calibration (0-255 vs 0-1: set, read
+// back, retry in the other scale on mismatch).
+
+async function addEffect(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (params.itemStartSeconds === undefined || params.itemStartSeconds === null) {
+    throw new Error("itemStartSeconds is required.");
+  }
+  if (!params.matchName && !params.effectQuery) {
+    throw new Error("Provide matchName or effectQuery (display-name substring).");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const trackType = params.trackType === "audio" ? "audio" : "video";
+  const trackIndex = Number(params.trackIndex || 0);
+  const tolerance = params.toleranceSeconds !== undefined ? Number(params.toleranceSeconds) : 0.05;
+
+  const target = await findTrackItem(sequence, trackType, trackIndex, params.itemStartSeconds, tolerance, safe);
+
+  // Resolve the effect matchName from the live filter inventory.
+  let matchName = params.matchName || null;
+  let displayName = null;
+  if (!matchName) {
+    const matchNames = (await safe("factory.getMatchNames", async () => await ppro.VideoFilterFactory.getMatchNames(), [])) || [];
+    const displayNames =
+      (await safe("factory.getDisplayNames", async () => await ppro.VideoFilterFactory.getDisplayNames(), [])) || [];
+    const query = String(params.effectQuery).toLowerCase();
+    const hits = [];
+    for (let i = 0; i < displayNames.length; i++) {
+      if (String(displayNames[i]).toLowerCase().includes(query)) hits.push(i);
+    }
+    if (hits.length === 0) {
+      throw new Error(`No video filter display name contains ${JSON.stringify(params.effectQuery)} (of ${displayNames.length}).`);
+    }
+    matchName = matchNames[hits[0]];
+    displayName = displayNames[hits[0]];
+    if (hits.length > 1) {
+      diagnostics.push(
+        `effectQuery matched ${hits.length} filters; using the first. Candidates: ` +
+          JSON.stringify(hits.map((i) => displayNames[i])),
+      );
+    }
+  }
+
+  const chain = await safe("getComponentChain", async () => await target.getComponentChain(), null);
+  if (!chain) throw new Error("Could not read the clip's component chain.");
+
+  const result = {
+    applied: false,
+    matchName,
+    displayName,
+    clipName: await safe("item.getName", async () => await target.getName(), null),
+    params: [],
+    colorSet: null,
+    diagnostics,
+  };
+
+  let applied = null;
+  if (params.existing) {
+    // Inspect / re-configure an effect ALREADY on the clip (no re-append).
+    const count = (await safe("componentCount", async () => chain.getComponentCount(), 0)) || 0;
+    for (let i = 0; i < count; i++) {
+      const candidate = await safe(`component(${i})`, async () => chain.getComponentAtIndex(i), null);
+      if (!candidate) continue;
+      const candidateMatch = await safe(`component(${i}).matchName`, async () => await candidate.getMatchName(), null);
+      if (candidateMatch === matchName) {
+        applied = candidate;
+        break;
+      }
+    }
+    if (!applied) throw new Error(`Effect ${matchName} is not on the clip.`);
+    result.applied = true;
+  } else {
+    const component = await safe(
+      "VideoFilterFactory.createComponent",
+      async () => await ppro.VideoFilterFactory.createComponent(matchName),
+      null,
+    );
+    if (!component) throw new Error(`Could not create filter component: ${matchName}`);
+    const countBefore = (await safe("componentCount(before)", async () => chain.getComponentCount(), 0)) || 0;
+    const appended = runTransaction(
+      project,
+      () => chain.createAppendComponentAction(component),
+      "Gospelo bridge: add effect",
+      diagnostics,
+    );
+    if (!appended) return result;
+    const countAfter = (await safe("componentCount(after)", async () => chain.getComponentCount(), 0)) || 0;
+    result.applied = countAfter === countBefore + 1;
+    applied = await safe("getComponentAtIndex(new)", async () => chain.getComponentAtIndex(countAfter - 1), null);
+    if (!applied) return result;
+  }
+
+  // Inventory the new effect's params (and find colour params structurally).
+  const paramCount = (await safe("effect.paramCount", async () => applied.getParamCount(), 0)) || 0;
+  let colorParam = null;
+  let colorParamIndex = null;
+  for (let i = 0; i < paramCount; i++) {
+    const param = await safe(`effect.getParam(${i})`, async () => applied.getParam(i), null);
+    if (!param) continue;
+    const value = await readComponentParamValue(param, `effectParam${i}`, safe);
+    result.params.push({ index: i, displayName: param.displayName || null, value });
+    const isColor =
+      value !== null &&
+      typeof value === "object" &&
+      ("red" in value || "r" in value) &&
+      ("blue" in value || "b" in value);
+    if (colorParam === null && isColor) {
+      colorParam = param;
+      colorParamIndex = i;
+    }
+  }
+
+  // Optional: set a colour parameter from a hex string with range calibration.
+  if (params.colorHex && colorParam) {
+    const hex = String(params.colorHex).replace(/^#/, "");
+    const r255 = parseInt(hex.slice(0, 2), 16);
+    const g255 = parseInt(hex.slice(2, 4), 16);
+    const b255 = parseInt(hex.slice(4, 6), 16);
+    const attempts = [
+      { scale: "0-255", r: r255, g: g255, b: b255 },
+      { scale: "0-1", r: r255 / 255, g: g255 / 255, b: b255 / 255 },
+    ];
+    for (const attempt of attempts) {
+      const ok = runTransaction(
+        project,
+        () =>
+          colorParam.createSetValueAction(
+            colorParam.createKeyframe(new ppro.Color(attempt.r, attempt.g, attempt.b, 1)),
+            true,
+          ),
+        "Gospelo bridge: set effect color",
+        diagnostics,
+      );
+      const readback = ok ? await readComponentParamValue(colorParam, "colorReadback", safe) : null;
+      // Normalize the read-back channels to 0-255 and compare against the
+      // requested hex; the BLUE channel is the strongest signal here.
+      let matches = false;
+      if (readback && readback._type === "color") {
+        const maxChannel = Math.max(readback.red || 0, readback.green || 0, readback.blue || 0);
+        const scale = maxChannel <= 1.001 ? 255 : 1;
+        matches =
+          Math.abs((readback.red || 0) * scale - r255) <= 3 &&
+          Math.abs((readback.green || 0) * scale - g255) <= 3 &&
+          Math.abs((readback.blue || 0) * scale - b255) <= 3;
+      }
+      result.colorSet = { paramIndex: colorParamIndex, scaleTried: attempt.scale, readback, accepted: matches };
+      if (matches) break;
+    }
+  } else if (params.colorHex && !colorParam) {
+    diagnostics.push("colorHex given but no colour-typed parameter was detected on the effect.");
+  }
+  return result;
 }
 
 // ---- project.renameItem (rename a bin item; sequences share this name) --------

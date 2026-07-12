@@ -129,6 +129,7 @@ class PremiereBridge:
             "project.createSequence",
             "project.save",
             "project.renameItem",
+            "sequence.addEffect",
         }
     )
 

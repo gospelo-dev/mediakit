@@ -551,6 +551,36 @@ capsuleID を毎回新規化）→ ② `sequence.insertMogrt` でキュー開始
 
 ---
 
+## premiere_add_effect（write・エフェクト適用 = ロードマップ段階 4）
+
+クリップにビデオエフェクトを追加し、任意でカラーパラメータを設定する
+（`sequence.addEffect`）。**公式 API の `VideoFilterFactory` を使用** —
+ロードマップでは非公式 QE DOM を想定していたが、公式ルートで達成したため
+バージョン耐性の懸念なし。
+
+- **エフェクト解決**: `getDisplayNames()` / `getMatchNames()` の実行時列挙から
+  表示名の部分一致（`effect_query="Ultra"` → `AE.ADBE Ultra Key`）。
+  ロケール非依存で matchName の推測が不要
+- **適用**: `createAppendComponentAction` の単一トランザクション。適用後に
+  全パラメータ（index / displayName / 現在値）を読み返して返却
+- **カラー設定**（`color_hex`）: カラー型パラメータを構造判定で自動検出し、
+  **値域自動較正**（0-255 → 読み返し不一致 → 0-1 で再試行）でセット。
+  実機で確定: **`ppro.Color` は 0〜1 の浮動小数**（0-255 を渡すとクランプされ
+  意図しない色になる — 初回実装の失敗から較正機構で回復）
+- **`existing=true`**: 適用済みエフェクトをクリップ上で検索して検査・再設定
+  （二重適用なし）
+
+**引数**: `item_start_seconds`, `effect_query` または `match_name`,
+`color_hex?`, `existing?`, `track_type`, `track_index`
+
+**検証結果**: misaki（ブルーバック `#002FFA`）に Ultra キーを適用し、
+キーカラーを較正セット（読み返し (0, 0.184, 0.9725) ≈ #002FFA）。フレーム
+書き出しで**ブルーが完全に抜け、下のオフィス背景に合成**されることを目視確認。
+Ultra キーの全 26 パラメータ（キーカラー=index 2、透明度・許容量・スピル等）の
+地図も取得済み。
+
+---
+
 ## ブリッジ allowlist との対応
 
 Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド allowlist で
@@ -578,6 +608,7 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_create_sequence` | `project.createSequence` | write（既存プロジェクト内・先頭素材の画角採用） |
 | `premiere_save_project` | `project.save` | write（保存。編集バッチの最後に必須） |
 | `premiere_rename_item` | `project.renameItem` | write（取り消し可能・シーケンス名共用） |
+| `premiere_add_effect` | `sequence.addEffect` | write（公式 VideoFilterFactory・カラー自動較正） |
 | `premiere_set_video_track_output` | `sequence.setTrackMute`（video） | write（目アイコン相当・応答に before/after） |
 | `premiere_set_audio_track_mute` | `sequence.setTrackMute`（audio） | write（M ボタン相当・応答に before/after） |
 | `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |
