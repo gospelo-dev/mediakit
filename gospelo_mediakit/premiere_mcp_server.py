@@ -331,6 +331,53 @@ async def premiere_add_marker(
 
 
 @mcp.tool()
+async def premiere_import_captions(
+    srt_path: str,
+    time_seconds: float = 0.0,
+    include_reflection: bool = False,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Import an SRT subtitle file into the active Premiere project (WRITE).
+
+    This MODIFIES the project: the SRT is imported into the project bin.
+    Automatic timeline placement is attempted, but Premiere's current UXP API
+    silently ignores it for caption items, so expect ``placed`` to be false
+    (it is judged by the observed caption-track count, not by the attempt).
+    When ``placed`` is false, one manual step remains: drag the imported
+    captions item from the Project panel onto the sequence — Premiere then
+    creates the caption track with all cues (the response's ``note`` says the
+    same).
+
+    Args:
+        srt_path: Absolute path of the ``.srt`` subtitle file.
+        time_seconds: Timeline position for the captions (default 0).
+        include_reflection: Attach ``_reflect`` (caption item/track method
+            names) to aid diagnosing API coverage. Off by default.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "imported": true, "placed": true|false,
+        "captionTracksBefore": N, "captionTracksAfter": M, ...}``.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    import os
+
+    srt_path = os.path.abspath(os.path.expanduser(srt_path))
+    if not os.path.isfile(srt_path):
+        return {"ok": False, "error": f"srt file not found: {srt_path}"}
+
+    try:
+        result = await _get_bridge().request(
+            "sequence.importCaptions",
+            {"srtPath": srt_path, "timeSeconds": time_seconds, "debug": include_reflection},
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

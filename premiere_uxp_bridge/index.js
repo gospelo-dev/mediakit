@@ -131,6 +131,10 @@ function connect() {
         result = await insertClip(params);
       } else if (message.method === "sequence.addMarker") {
         result = await addMarker(params);
+      } else if (message.method === "sequence.importCaptions") {
+        result = await importCaptions(params);
+      } else if (message.method === "sequence.insertMogrt") {
+        result = await insertMogrt(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -738,6 +742,302 @@ function onForget() {
   }
   forgetToken();
   setStatus("Token forgotten. Enter a bridge token to connect.");
+}
+
+// ---- sequence.importCaptions (SRT -> caption track) --------------------------
+// Imports an SRT file into the project and attempts to place it on the active
+// sequence, which in the UI creates a caption track. Premiere's caption API
+// is still immature, so this method is deliberately observational: it reports
+// caption-track counts before/after and rich diagnostics/_reflect so a failed
+// placement tells us exactly which step needs a different API.
+
+async function listRootItemIds(project) {
+  const root = await project.getRootItem();
+  const items = await ppro.FolderItem.cast(root).getItems();
+  const ids = [];
+  for (const item of items) {
+    ids.push(ppro.ProjectItem.cast(item).getId());
+  }
+  return ids;
+}
+
+async function importCaptions(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (!params.srtPath || typeof params.srtPath !== "string") {
+    throw new Error("srtPath (absolute .srt file path) is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const before = {
+    itemIds: (await safe("listRootItemIds(before)", async () => await listRootItemIds(project), [])) || [],
+    captionTracks: await safe(
+      "getCaptionTrackCount(before)",
+      async () => await sequence.getCaptionTrackCount(),
+      null,
+    ),
+  };
+
+  const imported = await safe(
+    "project.importFiles(srt)",
+    async () => await project.importFiles([params.srtPath], true),
+    false,
+  );
+
+  const afterIds = (await safe("listRootItemIds(after)", async () => await listRootItemIds(project), [])) || [];
+  const newIds = afterIds.filter((id) => !before.itemIds.includes(id));
+
+  const result = {
+    imported: Boolean(imported),
+    newItemIds: newIds,
+    placed: false,
+    captionTracksBefore: before.captionTracks,
+    captionTracksAfter: null,
+    diagnostics,
+  };
+
+  let newItem = null;
+  if (newIds.length > 0) {
+    newItem = await safe(
+      "findProjectItemById(newItem)",
+      async () => await findProjectItemById(project, newIds[0]),
+      null,
+    );
+  }
+
+  if (newItem) {
+    const time = await safe(
+      "TickTime.createWithSeconds",
+      async () => ppro.TickTime.createWithSeconds(Number(params.timeSeconds || 0)),
+      null,
+    );
+    const editor = await safe("SequenceEditor.getEditor", async () => ppro.SequenceEditor.getEditor(sequence), null);
+    if (time && editor) {
+      // Known limitation: for caption items this transaction commits but is a
+      // silent no-op (Premiere's caption API is not public yet). We attempt it
+      // anyway so a future Premiere that supports it starts working, and judge
+      // success by the OBSERVED caption-track delta below, not by the commit.
+      runTransaction(
+        project,
+        () => editor.createInsertProjectItemAction(newItem, time, 0, 0, false),
+        "Gospelo bridge: place captions",
+        diagnostics,
+      );
+    }
+  }
+
+  result.captionTracksAfter = await safe(
+    "getCaptionTrackCount(after)",
+    async () => await sequence.getCaptionTrackCount(),
+    null,
+  );
+  result.placed =
+    typeof result.captionTracksAfter === "number" &&
+    typeof result.captionTracksBefore === "number" &&
+    result.captionTracksAfter > result.captionTracksBefore;
+  if (result.imported && !result.placed) {
+    result.note =
+      "SRT imported into the project bin, but automatic timeline placement is " +
+      "not supported by Premiere's current UXP API. Drag the imported captions " +
+      "item from the Project panel onto the sequence once; Premiere will create " +
+      "the caption track with all cues.";
+  }
+
+  if (params.debug) {
+    result._reflect = {
+      newItem: reflectMethods(newItem),
+      captionTrack: reflectMethods(
+        await safe(
+          "getCaptionTrack(0)",
+          async () =>
+            (await sequence.getCaptionTrackCount()) > 0 ? await sequence.getCaptionTrack(0) : null,
+          null,
+        ),
+      ),
+      // Inventory of the ppro module: which classes exist at all (looking for
+      // any caption-related creation API the docs do not mention yet).
+      pproKeys: Object.keys(ppro).sort(),
+      captionTrackStatic: ppro.CaptionTrack ? reflectMethods(ppro.CaptionTrack) : null,
+      sequenceUtilsStatic: ppro.SequenceUtils ? reflectMethods(ppro.SequenceUtils) : null,
+      transcriptStatic: ppro.Transcript ? reflectMethods(ppro.Transcript) : null,
+      textSegmentsStatic: ppro.TextSegments ? reflectMethods(ppro.TextSegments) : null,
+      projectUtilsStatic: ppro.ProjectUtils ? reflectMethods(ppro.ProjectUtils) : null,
+    };
+  }
+
+  // Experimental probing of the UNDOCUMENTED editor.createAddItemAction /
+  // createAddItemsAction (present at runtime, absent from even the beta
+  // type definitions). Error messages reveal the expected signature.
+  if (params.experiment && newItem) {
+    const editor = await safe("SequenceEditor.getEditor(exp)", async () => ppro.SequenceEditor.getEditor(sequence), null);
+    const time = await safe(
+      "TickTime.createWithSeconds(exp)",
+      async () => ppro.TickTime.createWithSeconds(Number(params.timeSeconds || 0)),
+      null,
+    );
+    const experiment = {
+      addItemArity: editor && editor.createAddItemAction ? editor.createAddItemAction.length : null,
+      addItemsArity: editor && editor.createAddItemsAction ? editor.createAddItemsAction.length : null,
+      attempts: [],
+    };
+    if (editor && time) {
+      const variants = [
+        { label: "addItem(item, time, 0, 0)", build: () => editor.createAddItemAction(newItem, time, 0, 0) },
+        { label: "addItem(item, time, 0, 0, false)", build: () => editor.createAddItemAction(newItem, time, 0, 0, false) },
+        { label: "addItem(item, time, 0, 0, 0)", build: () => editor.createAddItemAction(newItem, time, 0, 0, 0) },
+        { label: "addItem(item, 0, time, 0)", build: () => editor.createAddItemAction(newItem, 0, time, 0) },
+      ];
+      experiment.trackItemSelectionStatic = ppro.TrackItemSelection
+        ? reflectMethods(ppro.TrackItemSelection)
+        : null;
+      for (const variant of variants) {
+        const attempt = { label: variant.label, committed: false, error: null };
+        try {
+          project.lockedAccess(() => {
+            project.executeTransaction((compoundAction) => {
+              compoundAction.addAction(variant.build());
+            }, `Gospelo experiment: ${variant.label}`);
+          });
+          attempt.committed = true;
+        } catch (error) {
+          attempt.error = String((error && (error.message || error)) || error);
+        }
+        attempt.captionTracksNow = await safe(
+          `captionCount(${variant.label})`,
+          async () => await sequence.getCaptionTrackCount(),
+          null,
+        );
+        experiment.attempts.push(attempt);
+        // Stop early if a caption track actually appeared.
+        if (
+          typeof attempt.captionTracksNow === "number" &&
+          typeof result.captionTracksBefore === "number" &&
+          attempt.captionTracksNow > result.captionTracksBefore
+        ) {
+          break;
+        }
+      }
+    }
+    result._experiment = experiment;
+  }
+  return result;
+}
+
+// ---- sequence.insertMogrt (editable text telop via Motion Graphics template) --
+// Inserts a .mogrt at a given time/track and, when `text` is given, rewrites
+// the template's text parameter so the telop content is fully programmatic AND
+// remains editable in Premiere's Essential Graphics panel. Without mogrtPath
+// this acts as reconnaissance and only returns the installed-mogrt directory.
+
+async function insertMogrt(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  // Reconnaissance mode: where do Premiere's bundled .mogrt files live?
+  if (!params.mogrtPath) {
+    const installed = await safe(
+      "SequenceEditor.getInstalledMogrtPath",
+      async () => await ppro.SequenceEditor.getInstalledMogrtPath(),
+      null,
+    );
+    return { installedMogrtPath: installed, diagnostics };
+  }
+
+  const editor = await safe("SequenceEditor.getEditor", async () => ppro.SequenceEditor.getEditor(sequence), null);
+  const time = await safe(
+    "TickTime.createWithSeconds",
+    async () => ppro.TickTime.createWithSeconds(Number(params.timeSeconds || 0)),
+    null,
+  );
+  const videoTrackIndex = Number(params.videoTrackIndex || 0);
+  const audioTrackIndex = Number(params.audioTrackIndex || 0);
+
+  const result = {
+    inserted: false,
+    itemCount: 0,
+    components: [],
+    textSet: false,
+    textParam: null,
+    diagnostics,
+  };
+  if (!editor || !time) return result;
+
+  // insertMogrtFromPath is synchronous per the type definitions and (like the
+  // create*Action factories) must run inside lockedAccess.
+  let insertedItems = null;
+  try {
+    project.lockedAccess(() => {
+      insertedItems = editor.insertMogrtFromPath(params.mogrtPath, time, videoTrackIndex, audioTrackIndex);
+    });
+  } catch (error) {
+    diagnostics.push(`insertMogrtFromPath: ${String((error && (error.message || error)) || error)}`);
+  }
+  if (!insertedItems || !insertedItems.length) return result;
+  result.inserted = true;
+  result.itemCount = insertedItems.length;
+
+  // Inventory the component chain of the first (video) item to find the text param.
+  const videoItem = insertedItems[0];
+  const chain = await safe("getComponentChain", async () => await videoItem.getComponentChain(), null);
+  if (!chain) return result;
+
+  let textParamRef = null;
+  const componentCount = (await safe("getComponentCount", async () => chain.getComponentCount(), 0)) || 0;
+  for (let ci = 0; ci < componentCount; ci++) {
+    const component = await safe(`getComponentAtIndex(${ci})`, async () => chain.getComponentAtIndex(ci), null);
+    if (!component) continue;
+    const info = {
+      matchName: await safe(`component[${ci}].getMatchName`, async () => await component.getMatchName(), null),
+      displayName: await safe(`component[${ci}].getDisplayName`, async () => await component.getDisplayName(), null),
+      params: [],
+    };
+    const paramCount = (await safe(`component[${ci}].getParamCount`, async () => component.getParamCount(), 0)) || 0;
+    for (let pi = 0; pi < paramCount; pi++) {
+      const param = await safe(`component[${ci}].getParam(${pi})`, async () => component.getParam(pi), null);
+      if (!param) continue;
+      const displayName = param.displayName || null;
+      info.params.push({ index: pi, displayName });
+      if (
+        textParamRef === null &&
+        typeof displayName === "string" &&
+        /text|テキスト|ソース/i.test(displayName)
+      ) {
+        textParamRef = { param, component: ci, index: pi, displayName };
+      }
+    }
+    result.components.push(info);
+  }
+
+  // Rewrite the text parameter when requested.
+  if (typeof params.text === "string" && params.text && textParamRef) {
+    result.textParam = {
+      component: textParamRef.component,
+      index: textParamRef.index,
+      displayName: textParamRef.displayName,
+    };
+    try {
+      project.lockedAccess(() => {
+        project.executeTransaction((compoundAction) => {
+          const keyframe = textParamRef.param.createKeyframe(params.text);
+          compoundAction.addAction(textParamRef.param.createSetValueAction(keyframe, true));
+        }, "Gospelo bridge: set telop text");
+      });
+      result.textSet = true;
+    } catch (error) {
+      diagnostics.push(`setText: ${String((error && (error.message || error)) || error)}`);
+    }
+  }
+
+  return result;
 }
 
 entrypoints.setup({

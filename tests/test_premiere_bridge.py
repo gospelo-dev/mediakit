@@ -262,6 +262,43 @@ def test_add_marker_round_trip():
     asyncio.run(run())
 
 
+def test_import_captions_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "sequence.importCaptions",
+                {"srtPath": "/tmp/captions.srt", "timeSeconds": 0.0},
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "sequence.importCaptions"
+        assert request["params"]["srtPath"] == "/tmp/captions.srt"
+
+        payload = {
+            "imported": True,
+            "newItemIds": ["item-1"],
+            "placed": True,
+            "captionTracksBefore": 0,
+            "captionTracksAfter": 1,
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["placed"] is True
+        assert result["captionTracksAfter"] == 1
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()

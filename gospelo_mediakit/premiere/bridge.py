@@ -114,6 +114,8 @@ class PremiereBridge:
             "project.create",
             "sequence.insertClip",
             "sequence.addMarker",
+            "sequence.importCaptions",
+            "sequence.insertMogrt",
         }
     )
 
