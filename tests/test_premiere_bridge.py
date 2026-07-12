@@ -499,6 +499,55 @@ def test_razor_clip_round_trip():
     asyncio.run(run())
 
 
+def test_list_sequences_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request("project.listSequences", {}, timeout_seconds=1)
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "project.listSequences"
+
+        payload = {
+            "activeSequenceName": "dir-test-seq",
+            "sequences": [
+                {
+                    "name": "dir-test-seq",
+                    "isActive": True,
+                    "frameWidth": 1920,
+                    "frameHeight": 1080,
+                    "fps": 16.0,
+                    "videoTrackCount": 3,
+                    "audioTrackCount": 3,
+                },
+                {
+                    "name": "dir-test-seq_Sub_01",
+                    "isActive": False,
+                    "frameWidth": 1920,
+                    "frameHeight": 1080,
+                    "fps": 16.0,
+                    "videoTrackCount": 3,
+                    "audioTrackCount": 3,
+                },
+            ],
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert len(result["sequences"]) == 2
+        assert result["sequences"][0]["frameWidth"] == 1920
+        assert result["sequences"][1]["isActive"] is False
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()

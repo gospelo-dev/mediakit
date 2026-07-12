@@ -125,6 +125,10 @@ class PremiereBridge:
             "sequence.removeClip",
             "sequence.setClipTransform",
             "project.setActiveSequence",
+            "project.listSequences",
+            "project.createSequence",
+            "project.save",
+            "project.renameItem",
         }
     )
 

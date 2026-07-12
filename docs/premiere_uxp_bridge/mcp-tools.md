@@ -524,6 +524,33 @@ capsuleID を毎回新規化）→ ② `sequence.insertMogrt` でキュー開始
 
 ---
 
+## プロジェクト管理: list_sequences / create_sequence / save_project / rename_item
+
+- `premiere_list_sequences(include_clip_transforms?)`（read）:
+  **親・子（サブシーケンス）を問わず全シーケンス**の画角（`frameWidth`/`frameHeight`）・
+  `fps`・トラック数を、**アクティブ切り替えなしで**一括取得。
+  `include_clip_transforms=true` で各シーケンスのビデオクリップ一覧も付く:
+  Motion トランスフォーム（`position` 正規化 0〜1 / `scale` / `scaleWidth` /
+  `uniformScale`）＋**ソース画角**（実メディアは MCP 層の ffprobe ハイブリッドで
+  `sourceWidth/Height/Fps`、ネストクリップは兄弟シーケンスの画角を名前照合で
+  解決し `isNested: true`）。UXP API にはメディアのソース画角を返すメソッドが
+  存在しない（stable/beta 型定義とも確認済み）ため、このハイブリッドが正解
+- `premiere_create_sequence(name, item_ids)`（write）: **既存プロジェクト内**に
+  シーケンスを新規作成（`createSequenceFromMedia`）。**先頭アイテムの画角・fps を
+  自動採用**し、アイテムをタイムラインに配置（実測: misaki_0 から 1104×816、
+  demo_base から 1920×1080）
+- `premiere_save_project()`（write）: アクティブプロジェクトを保存。
+  **ブリッジの編集は保存するまでディスクに残らない**（未保存で閉じると全て消える
+  — 実機で経験済みの教訓）。編集バッチの最後に呼ぶこと
+- `premiere_rename_item(item_id, new_name)`（write）: ビンアイテムのリネーム。
+  シーケンスはビンアイテムと名前を共有するため、シーケンス名の変更もこれで行う
+  （実測: main-edit → pip）
+
+また `premiere_get_sequence_state` の `sequence` ブロックに
+`frameWidth` / `frameHeight` / `fps` が追加され、毎回の L1 観測に画角が付属する。
+
+---
+
 ## ブリッジ allowlist との対応
 
 Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド allowlist で
@@ -547,6 +574,10 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_remove_clip` | `sequence.removeClip` | write（取り消し可能・ripple 対応） |
 | `premiere_set_clip_transform` | `sequence.setClipTransform` | write（Motion スケール/位置・読み取り較正つき） |
 | `premiere_set_active_sequence` | `project.setActiveSequence` | write（UI 状態のみ・ネスト操作の鍵） |
+| `premiere_list_sequences` | `project.listSequences` | read（全シーケンスの画角/fps/トランスフォーム） |
+| `premiere_create_sequence` | `project.createSequence` | write（既存プロジェクト内・先頭素材の画角採用） |
+| `premiere_save_project` | `project.save` | write（保存。編集バッチの最後に必須） |
+| `premiere_rename_item` | `project.renameItem` | write（取り消し可能・シーケンス名共用） |
 | `premiere_set_video_track_output` | `sequence.setTrackMute`（video） | write（目アイコン相当・応答に before/after） |
 | `premiere_set_audio_track_mute` | `sequence.setTrackMute`（audio） | write（M ボタン相当・応答に before/after） |
 | `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |

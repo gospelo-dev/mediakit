@@ -153,6 +153,14 @@ function connect() {
         result = await setClipTransform(params);
       } else if (message.method === "project.setActiveSequence") {
         result = await setActiveSequence(params);
+      } else if (message.method === "project.listSequences") {
+        result = await listSequences(params);
+      } else if (message.method === "project.createSequence") {
+        result = await createSequenceInProject(params);
+      } else if (message.method === "project.save") {
+        result = await saveProject(params);
+      } else if (message.method === "project.renameItem") {
+        result = await renameItem(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -355,6 +363,13 @@ async function getSequenceState(includeReflection) {
   const diagnostics = [];
   const safe = makeSafe(diagnostics);
 
+  const frameSize = await safe("sequence.getFrameSize", async () => await sequence.getFrameSize(), null);
+  const timebaseTicks = await safe("sequence.getTimebase", async () => {
+    const timebase = await sequence.getTimebase();
+    const n = Number(typeof timebase === "object" && timebase !== null ? timebase.ticks || timebase : timebase);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }, null);
+
   const state = {
     project: {
       name: await safe("project.name", async () => project.name, null),
@@ -367,6 +382,9 @@ async function getSequenceState(includeReflection) {
         async () => tickTimeToSeconds(await sequence.getPlayerPosition()),
         null,
       ),
+      frameWidth: frameSize ? frameSize.width : null,
+      frameHeight: frameSize ? frameSize.height : null,
+      fps: timebaseTicks ? TICKS_PER_SECOND / timebaseTicks : null,
     },
     videoTracks: [],
     audioTracks: [],
@@ -1597,6 +1615,199 @@ async function setActiveSequence(params) {
     availableSequences: names,
     diagnostics,
   };
+}
+
+// Read one component-param value via its start keyframe (shared helper).
+async function readComponentParamValue(param, label, safe) {
+  return await safe(`${label}.getStartValue`, async () => {
+    const keyframe = await param.getStartValue();
+    const value = keyframe && keyframe.value !== undefined ? keyframe.value : keyframe;
+    if (value && typeof value === "object" && "x" in value && "y" in value) return { x: value.x, y: value.y };
+    if (value && typeof value === "object" && "value" in value) return value.value;
+    return value;
+  }, null);
+}
+
+// ---- project.createSequence (new sequence in the EXISTING project) ------------
+// createSequenceFromMedia adopts the first clip's format (frame size / fps)
+// and places the given clips; without items this method errors (an empty
+// preset-based sequence would need a preset path - not exposed yet).
+
+async function createSequenceInProject(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  if (!params.name || typeof params.name !== "string") {
+    throw new Error("name is required.");
+  }
+  if (!Array.isArray(params.itemIds) || params.itemIds.length === 0) {
+    throw new Error("itemIds (project item IDs from project.assets.list) is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const clips = [];
+  for (const id of params.itemIds) {
+    const item = await safe(`findProjectItemById(${id})`, async () => await findProjectItemById(project, id), null);
+    if (!item) throw new Error(`Project item not found: ${id}`);
+    clips.push(ppro.ClipProjectItem.cast(item));
+  }
+
+  const sequence = await safe(
+    "createSequenceFromMedia",
+    async () => await project.createSequenceFromMedia(params.name, clips),
+    null,
+  );
+  const result = {
+    created: Boolean(sequence),
+    name: sequence ? await safe("sequence.name", async () => sequence.name, null) : null,
+    diagnostics,
+  };
+  if (sequence) {
+    const frameSize = await safe("getFrameSize", async () => await sequence.getFrameSize(), null);
+    result.frameWidth = frameSize ? frameSize.width : null;
+    result.frameHeight = frameSize ? frameSize.height : null;
+  }
+  return result;
+}
+
+// ---- project.save --------------------------------------------------------------
+
+async function saveProject(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const saved = await safe("project.save", async () => await project.save(), null);
+  return {
+    saved: saved !== null ? Boolean(saved) || saved === undefined : false,
+    path: await safe("project.path", async () => project.path, null),
+    diagnostics,
+  };
+}
+
+// ---- project.renameItem (rename a bin item; sequences share this name) --------
+
+async function renameItem(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  if (!params.itemId || typeof params.itemId !== "string") {
+    throw new Error("itemId is required (from project.assets.list).");
+  }
+  if (!params.newName || typeof params.newName !== "string") {
+    throw new Error("newName is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const item = await safe("findProjectItemById", async () => await findProjectItemById(project, params.itemId), null);
+  if (!item) throw new Error(`Project item not found: ${params.itemId}`);
+  const projectItem = ppro.ProjectItem.cast(item);
+  const before = await safe("item.name(before)", async () => projectItem.name, null);
+
+  const renamed = runTransaction(
+    project,
+    () => projectItem.createSetNameAction(params.newName),
+    "Gospelo bridge: rename item",
+    diagnostics,
+  );
+  const after = await safe("item.name(after)", async () => projectItem.name, null);
+  return { renamed: renamed && after === params.newName, nameBefore: before, nameAfter: after, diagnostics };
+}
+
+// ---- project.listSequences (frame size / fps of ALL sequences) ----------------
+// Enumerates every sequence in the project - parents and nested children
+// alike - without switching the active sequence, and reads each one's frame
+// size, fps and track counts directly.
+
+async function listSequences(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const active = await safe("getActiveSequence", async () => await project.getActiveSequence(), null);
+  const activeName = active ? await safe("active.name", async () => active.name, null) : null;
+
+  const sequences = (await safe("getSequences", async () => await project.getSequences(), [])) || [];
+  const out = [];
+  for (const sequence of sequences) {
+    const name = await safe("sequence.name", async () => sequence.name, null);
+    const frameSize = await safe(`getFrameSize(${name})`, async () => await sequence.getFrameSize(), null);
+    const timebaseTicks = await safe(`getTimebase(${name})`, async () => {
+      const timebase = await sequence.getTimebase();
+      const n = Number(typeof timebase === "object" && timebase !== null ? timebase.ticks || timebase : timebase);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }, null);
+    const entry = {
+      name,
+      isActive: name !== null && name === activeName,
+      frameWidth: frameSize ? frameSize.width : null,
+      frameHeight: frameSize ? frameSize.height : null,
+      fps: timebaseTicks ? TICKS_PER_SECOND / timebaseTicks : null,
+      videoTrackCount: await safe(`videoCount(${name})`, async () => await sequence.getVideoTrackCount(), null),
+      audioTrackCount: await safe(`audioCount(${name})`, async () => await sequence.getAudioTrackCount(), null),
+    };
+
+    // Optionally include each video clip's Motion scale (horizontal/vertical)
+    // so scaling relationships across parents and nests are visible at once.
+    if (params.includeClipTransforms) {
+      entry.clips = [];
+      const vCount = entry.videoTrackCount || 0;
+      for (let ti = 0; ti < vCount; ti++) {
+        const track = await safe(`getVideoTrack(${name},${ti})`, async () => await sequence.getVideoTrack(ti), null);
+        if (!track) continue;
+        const items = (await safe(`getTrackItems(${name},${ti})`, async () => await getTrackItems(track), [])) || [];
+        for (const item of items) {
+          const clip = {
+            track: ti,
+            name: await safe("clip.getName", async () => await item.getName(), null),
+            startSeconds: await safe("clip.getStartTime", async () => tickTimeToSeconds(await item.getStartTime()), null),
+            endSeconds: await safe("clip.getEndTime", async () => tickTimeToSeconds(await item.getEndTime()), null),
+            mediaPath: await safe(
+              "clip.mediaPath",
+              async () => {
+                const projectItem = await item.getProjectItem();
+                if (!projectItem) return null;
+                return await ppro.ClipProjectItem.cast(projectItem).getMediaFilePath();
+              },
+              null,
+            ),
+            position: null,
+            scale: null,
+            scaleWidth: null,
+            uniformScale: null,
+          };
+          const chain = await safe("clip.getComponentChain", async () => await item.getComponentChain(), null);
+          if (chain) {
+            const componentCount = (await safe("clip.componentCount", async () => chain.getComponentCount(), 0)) || 0;
+            for (let ci = 0; ci < componentCount; ci++) {
+              const component = await safe(`clip.component(${ci})`, async () => chain.getComponentAtIndex(ci), null);
+              if (!component) continue;
+              const matchName = await safe("clip.matchName", async () => await component.getMatchName(), null);
+              if (matchName !== "AE.ADBE Motion") continue;
+              // Motion params (observed): 0 = Position (normalized 0..1),
+              // 1 = Scale, 2 = Scale Width, 3 = uniform-scale toggle.
+              const positionParam = await safe("positionParam", async () => component.getParam(0), null);
+              const scaleParam = await safe("scaleParam", async () => component.getParam(1), null);
+              const widthParam = await safe("widthParam", async () => component.getParam(2), null);
+              const uniformParam = await safe("uniformParam", async () => component.getParam(3), null);
+              if (positionParam) clip.position = await readComponentParamValue(positionParam, "position", safe);
+              if (scaleParam) clip.scale = await readComponentParamValue(scaleParam, "scale", safe);
+              if (widthParam) clip.scaleWidth = await readComponentParamValue(widthParam, "scaleWidth", safe);
+              if (uniformParam) clip.uniformScale = await readComponentParamValue(uniformParam, "uniform", safe);
+              break;
+            }
+          }
+          entry.clips.push(clip);
+        }
+      }
+    }
+    out.push(entry);
+  }
+  return { activeSequenceName: activeName, sequences: out, diagnostics };
 }
 
 // ---- sequence.setTrackMute (mute/unmute a track) ------------------------------

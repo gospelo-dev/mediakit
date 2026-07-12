@@ -59,11 +59,13 @@ async def premiere_get_sequence_state(
 ) -> dict[str, Any]:
     """Read the active Premiere sequence's structural state as JSON.
 
-    Returns the video/audio track layout, the clips on each track (name,
+    Returns the sequence's frame size (``frameWidth``/``frameHeight``) and
+    ``fps``, the video/audio track layout, the clips on each track (name,
     start/end/in/out in seconds, and media path where available), and the
     playhead position. This is the primary read-only observation used by an
     autonomous agent to judge whether an edit landed as intended. It never
-    changes the project, the timeline, or media files.
+    changes the project, the timeline, or media files. For a clip's SOURCE
+    dimensions, pass its ``mediaPath`` to ``mediakit_probe``.
 
     Args:
         include_reflection: Attach ``_reflect`` (available UXP method names on
@@ -1031,6 +1033,172 @@ async def premiere_set_active_sequence(
         result = await _get_bridge().request(
             "project.setActiveSequence",
             {"name": name},
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_list_sequences(
+    include_clip_transforms: bool = False,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """List every sequence in the project with frame size and fps (read-only).
+
+    Enumerates parents and nested (child) sequences alike, WITHOUT switching
+    the active sequence, and reads each one's frame size (``frameWidth`` /
+    ``frameHeight``), ``fps`` and track counts. Use it to pick coordinates
+    for ``premiere_set_clip_transform``, to check a nest's format before
+    editing inside it, or to find names for ``premiere_set_active_sequence``.
+
+    With ``include_clip_transforms`` each sequence also lists its video
+    clips with their Motion transform — ``position`` (normalized 0..1,
+    centre [0.5, 0.5]), ``scale`` (vertical/uniform) and ``scaleWidth``
+    (horizontal, used when ``uniformScale`` is false) — plus the clip's
+    SOURCE dimensions: real media is probed via ffprobe
+    (``sourceWidth``/``sourceHeight``/``sourceFps``), and nested-sequence
+    clips are resolved against the sibling sequence entries by name
+    (``isNested: true`` with the child sequence's frame size).
+
+    Returns:
+        ``{"ok": true, "activeSequenceName": "...", "sequences": [{"name",
+        "isActive", "frameWidth", "frameHeight", "fps", "videoTrackCount",
+        "audioTrackCount", "clips"?: [{"track", "name", "startSeconds",
+        "endSeconds", "mediaPath", "position", "scale", "scaleWidth",
+        "uniformScale", "sourceWidth", "sourceHeight", "sourceFps",
+        "isNested"}]}, ...]}``. On failure ``{"ok": false, "error": "..."}``.
+    """
+    import os
+
+    from gospelo_mediakit.core.ffmpeg import probe as _probe
+
+    try:
+        result = await _get_bridge().request(
+            "project.listSequences",
+            {"includeClipTransforms": include_clip_transforms},
+            timeout_seconds=timeout_seconds,
+        )
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if include_clip_transforms:
+        sequences = result.get("sequences", [])
+        frame_by_name = {
+            s.get("name"): (s.get("frameWidth"), s.get("frameHeight"), s.get("fps")) for s in sequences
+        }
+        probe_cache: dict[str, dict[str, Any]] = {}
+        for sequence in sequences:
+            for clip in sequence.get("clips", []) or []:
+                clip.setdefault("sourceWidth", None)
+                clip.setdefault("sourceHeight", None)
+                clip.setdefault("sourceFps", None)
+                clip.setdefault("isNested", False)
+                media_path = clip.get("mediaPath")
+                if media_path and os.path.isfile(media_path):
+                    if media_path not in probe_cache:
+                        info = await asyncio.to_thread(_probe, Path(media_path))
+                        probe_cache[media_path] = info or {}
+                    info = probe_cache[media_path]
+                    clip["sourceWidth"] = info.get("width")
+                    clip["sourceHeight"] = info.get("height")
+                    clip["sourceFps"] = info.get("fps")
+                elif clip.get("name") in frame_by_name:
+                    width, height, fps = frame_by_name[clip["name"]]
+                    clip["sourceWidth"] = width
+                    clip["sourceHeight"] = height
+                    clip["sourceFps"] = fps
+                    clip["isNested"] = True
+
+    return {"ok": True, **result}
+
+
+@mcp.tool()
+async def premiere_create_sequence(
+    name: str,
+    item_ids: list[str],
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Create a new sequence in the EXISTING project from media items (WRITE).
+
+    Uses Premiere's createSequenceFromMedia: the sequence adopts the FIRST
+    item's format (frame size / fps) and the items are placed on the
+    timeline. Get item IDs from ``premiere_list_project_assets`` or
+    ``premiere_import_media``. The new sequence becomes available to
+    ``premiere_set_active_sequence`` by its returned name.
+
+    Args:
+        name: Name for the new sequence.
+        item_ids: Project item IDs of the media to build the sequence from
+            (at least one; the first defines the format).
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "created": true, "name": "...", "frameWidth": ...,
+        "frameHeight": ...}``. On failure ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "project.createSequence",
+            {"name": name, "itemIds": item_ids},
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_save_project(
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Save the active Premiere project to disk (WRITE).
+
+    Bridge edits are only persisted when the project is saved — closing
+    Premiere without saving reverts everything to the last saved state.
+    Call this after a batch of successful edits.
+
+    Returns:
+        ``{"ok": true, "saved": true, "path": "..."}``.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "project.save",
+            {},
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_rename_item(
+    item_id: str,
+    new_name: str,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Rename a project bin item (WRITE, single undoable transaction).
+
+    Works for media items and sequences alike — a sequence shares its name
+    with its bin item, so renaming the item renames the sequence (update any
+    stored names used with ``premiere_set_active_sequence`` accordingly).
+
+    Args:
+        item_id: Project item ID from ``premiere_list_project_assets``.
+        new_name: The new name.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "renamed": true, "nameBefore": "...",
+        "nameAfter": "..."}``. On failure ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "project.renameItem",
+            {"itemId": item_id, "newName": new_name},
             timeout_seconds=timeout_seconds,
         )
         return {"ok": True, **result}
