@@ -15,9 +15,12 @@
 | 接続方式 | WSS（Let's Encrypt 証明書 + /etc/hosts loopback）、token 認証 |
 | 検証プロジェクト | `demo-project.prproj` |
 
-すべてのツールは**プロジェクトに対して読み取り専用**。プロジェクト・タイムライン・
-メディアを変更しない（`premiere_export_frame` は静止画ファイルを書き出すが、
-プレイヘッドも含めて Premiere 側の状態は変えない）。
+観測系ツール（status / assets / state / frame）は**プロジェクトに対して読み取り専用**
+（`premiere_export_frame` は静止画ファイルを書き出すが、プレイヘッドも含めて
+Premiere 側の状態は変えない）。write 系ツール（create_project / insert_clip /
+add_marker）はタイムライン等を変更するが、いずれも**単一の取り消し可能な
+トランザクション**として実行され、既存メディアファイルは変更しない。
+write 系のテストは使い捨てプロジェクト（`premiere_create_project` で作成）で行う。
 
 ---
 
@@ -191,6 +194,90 @@ L1 状態が予測したとおり該当時刻のクリップ（`misaki_9_colorma
 
 ---
 
+## premiere_create_project（write）
+
+新規の `.prproj` を作成してアクティブ化し、任意でメディア読み込みとシーケンス
+作成まで行う。**write 系テストのための使い捨てプロジェクト作成**が主用途。
+既存プロジェクト・メディアファイルは変更しない（アクティブが切り替わるのみ）。
+ブリッジメソッド `project.create` を呼ぶ。
+
+**引数**:
+
+| 名前 | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `path` | str | 必須 | 新規 `.prproj` の絶対パス。既存パスは拒否 |
+| `import_paths` | list[str] | なし | ルートビンに読み込むメディア（MCP 側で存在チェック） |
+| `sequence_name` | str | なし | 指定時、読み込んだクリップからシーケンスを作成 |
+| `include_reflection` | bool | `false` | `_reflect`（Project のメソッド一覧）を付加 |
+| `timeout_seconds` | float | `45.0` | タイムアウト（1〜60 秒） |
+
+**戻り値**（実測）: `{"ok": true, "created": true, "project": {name, path}, "importedCount": 1, "sequence": {"name": "bridge-test-seq"}, "diagnostics": []}`
+
+**検証結果**: 使い捨てプロジェクトを新規作成 → `misaki_0.mp4` 読み込み →
+シーケンス自動作成（V3/A3、クリップ 0〜7.2s 配置）。直後の
+`sequence.getState` で新プロジェクトがアクティブになったことを観測確認。
+`_reflect` で `executeTransaction` / `lockedAccess` / `createSequence` /
+`deleteSequence` / `save` / `saveAs` / `close` 等の実在を確認。
+
+---
+
+## premiere_insert_clip（write）
+
+アクティブなシーケンスにプロジェクトアイテムを挿入する。**タイムラインを変更
+する**。単一の取り消し可能なトランザクション（Premiere の取り消しで戻せる）。
+ブリッジメソッド `sequence.insertClip` を呼ぶ。実行後は
+`premiere_get_sequence_state` で結果を確認する（act → observe）。
+
+**引数**:
+
+| 名前 | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `project_item_id` | str | 必須 | `premiere_list_project_assets` の asset ID |
+| `time_seconds` | float | 必須 | 挿入位置（秒） |
+| `video_track_index` / `audio_track_index` | int | `0` | 対象トラック（0 始まり） |
+| `overwrite` | bool | `false` | `true` で上書き配置、`false` で挿入（後続シフト） |
+| `limit_shift` | bool | `false` | 挿入時のシフトを対象トラックに限定 |
+| `include_reflection` | bool | `false` | `_reflect`（SequenceEditor のメソッド一覧）を付加 |
+| `timeout_seconds` | float | `30.0` | タイムアウト（1〜60 秒） |
+
+**戻り値**（実測）: `{"ok": true, "inserted": true, "mode": "insert", "videoTrackIndex": 0, "audioTrackIndex": 0, "timeSeconds": 10, "diagnostics": []}`
+
+**検証結果**: 使い捨てプロジェクトで t=10s に挿入 → `sequence.getState` で
+クリップ行 2 → 4、新クリップが start=10 / end=17.2 に正確に配置されたことを
+観測確認。
+
+**実装上の重要点**: `create*Action` 系は `project.lockedAccess()` の**中で**
+生成しないと `Requires locked access` エラーになる（アクション生成と
+`executeTransaction` を同一の lockedAccess コールバック内で行う）。
+
+---
+
+## premiere_add_marker（write）
+
+アクティブなシーケンスにマーカーを追加する。**シーケンスのマーカーを変更
+する**。単一の取り消し可能なトランザクション。ブリッジメソッド
+`sequence.addMarker` を呼ぶ。応答に書き込み後のマーカー数（読み返し）を含む。
+
+**引数**:
+
+| 名前 | 型 | 既定値 | 説明 |
+|---|---|---|---|
+| `name` | str | 必須 | マーカー名 |
+| `time_seconds` | float | 必須 | 位置（秒） |
+| `duration_seconds` | float | なし | 長さ（秒） |
+| `comments` | str | なし | コメント |
+| `marker_type` | str | `Comment` | マーカー種別 |
+| `include_reflection` | bool | `false` | `_reflect`（Markers のメソッド一覧）を付加 |
+| `timeout_seconds` | float | `30.0` | タイムアウト（1〜60 秒） |
+
+**戻り値**（実測）: `{"ok": true, "added": true, "name": "bridge-marker", "timeSeconds": 5, "markerCount": 1, "diagnostics": []}`
+
+**検証結果**: t=5s に 2 秒のコメント付きマーカーを追加、`markerCount: 1` を
+読み返しで確認。`_reflect` で `createMoveMarkerAction` /
+`createRemoveMarkerAction` の実在も確認（将来のマーカー編集の道具）。
+
+---
+
 ## ブリッジ allowlist との対応
 
 Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド allowlist で
@@ -202,6 +289,9 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_list_project_assets` | `project.assets.list` | read |
 | `premiere_get_sequence_state` | `sequence.getState` | read |
 | `premiere_export_frame` | `program.exportFrame` | read（静止画ファイルのみ書き出し） |
+| `premiere_create_project` | `project.create` | write（新規プロジェクト作成のみ） |
+| `premiere_insert_clip` | `sequence.insertClip` | write（取り消し可能） |
+| `premiere_add_marker` | `sequence.addMarker` | write（取り消し可能） |
 
 新しい操作は、UXP ハンドラと Python allowlist の**両方**に明示的に追加した
 もののみ有効になる（任意コード実行は非対応・非方針）。

@@ -75,6 +75,12 @@ function connect() {
         result = await getSequenceState(Boolean(params.debug));
       } else if (message.method === "program.exportFrame") {
         result = await exportProgramFrame(params);
+      } else if (message.method === "project.create") {
+        result = await createProject(params);
+      } else if (message.method === "sequence.insertClip") {
+        result = await insertClip(params);
+      } else if (message.method === "sequence.addMarker") {
+        result = await addMarker(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -320,6 +326,85 @@ async function getSequenceState(includeReflection) {
   return state;
 }
 
+// ---- project.create (disposable test-project setup) -------------------------
+// Creates a NEW .prproj at the given path (it becomes the active project),
+// optionally imports media files and creates a sequence from them. Intended
+// for setting up disposable test projects so that write-method tests never
+// touch a real editing project. Existing projects are not modified.
+
+async function collectClipItems(project) {
+  const root = await project.getRootItem();
+  const items = await ppro.FolderItem.cast(root).getItems();
+  const clips = [];
+  for (const item of items) {
+    const projectItem = ppro.ProjectItem.cast(item);
+    const isBinLike =
+      projectItem.type === ppro.ProjectItem.TYPE_ROOT || projectItem.type === ppro.ProjectItem.TYPE_BIN;
+    if (!isBinLike) clips.push(ppro.ClipProjectItem.cast(item));
+  }
+  return clips;
+}
+
+async function createProject(params) {
+  if (!params.path || typeof params.path !== "string") {
+    throw new Error("path (absolute .prproj file path) is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const project = await safe("Project.createProject", async () => await ppro.Project.createProject(params.path), null);
+  if (!project) {
+    const result = { created: false, diagnostics };
+    if (params.debug) result._reflect = { projectStatic: reflectMethods(ppro.Project) };
+    return result;
+  }
+
+  const result = {
+    created: true,
+    project: {
+      name: await safe("project.name", async () => project.name, null),
+      path: await safe("project.path", async () => project.path, null),
+    },
+    importedCount: 0,
+    sequence: null,
+    diagnostics,
+  };
+
+  if (Array.isArray(params.importPaths) && params.importPaths.length > 0) {
+    const ok = await safe(
+      "project.importFiles",
+      async () => await project.importFiles(params.importPaths, true),
+      false,
+    );
+    if (ok) {
+      const clips = (await safe("collectClipItems", async () => await collectClipItems(project), [])) || [];
+      result.importedCount = clips.length;
+
+      if (typeof params.sequenceName === "string" && params.sequenceName && clips.length > 0) {
+        const sequence = await safe(
+          "project.createSequenceFromMedia",
+          async () => await project.createSequenceFromMedia(params.sequenceName, clips),
+          null,
+        );
+        if (sequence) {
+          result.sequence = {
+            name: await safe("sequence.name", async () => sequence.name, null),
+          };
+        }
+      }
+    }
+  }
+
+  if (params.debug) {
+    result._reflect = {
+      projectStatic: reflectMethods(ppro.Project),
+      project: reflectMethods(project),
+    };
+  }
+  return result;
+}
+
 // ---- program.exportFrame (L2 visual observation) ----------------------------
 // Exports one frame of the active sequence as a still image, so an agent can
 // judge the picture itself (color, framing). Read-only: the frame time is
@@ -394,6 +479,179 @@ async function exportProgramFrame(params) {
     async () => await ppro.Exporter.exportSequenceFrame(sequence, time, fileName, params.outputDir, width, height),
     null,
   );
+  return result;
+}
+
+// ---- write methods (stage 3) ------------------------------------------------
+// Timeline edits go through Premiere's action/transaction pattern:
+// build a create*Action, then commit it inside project.lockedAccess ->
+// project.executeTransaction. Each method is a narrow, explicit operation
+// (no arbitrary eval), and callers are expected to verify the result with
+// sequence.getState (act -> observe).
+
+async function findProjectItemById(project, wantedId) {
+  const root = await project.getRootItem();
+
+  async function walk(item) {
+    const projectItem = ppro.ProjectItem.cast(item);
+    if (projectItem.getId() === wantedId) return item;
+    const isBinLike =
+      projectItem.type === ppro.ProjectItem.TYPE_ROOT || projectItem.type === ppro.ProjectItem.TYPE_BIN;
+    if (isBinLike) {
+      const children = await ppro.FolderItem.cast(item).getItems();
+      for (const child of children) {
+        const found = await walk(child);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  return await walk(root);
+}
+
+function runTransaction(project, buildAction, undoLabel, diagnostics) {
+  // lockedAccess/executeTransaction take synchronous callbacks, and the
+  // create*Action factories themselves throw "Requires locked access" unless
+  // called INSIDE lockedAccess — so the action is built within the callback.
+  try {
+    project.lockedAccess(() => {
+      project.executeTransaction((compoundAction) => {
+        compoundAction.addAction(buildAction());
+      }, undoLabel);
+    });
+    return true;
+  } catch (error) {
+    diagnostics.push(`executeTransaction: ${String((error && (error.message || error)) || error)}`);
+    return false;
+  }
+}
+
+async function insertClip(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (!params.projectItemId || typeof params.projectItemId !== "string") {
+    throw new Error("projectItemId is required (use project.assets.list to find it).");
+  }
+  if (params.timeSeconds === undefined || params.timeSeconds === null) {
+    throw new Error("timeSeconds is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const item = await safe(
+    "findProjectItemById",
+    async () => await findProjectItemById(project, params.projectItemId),
+    null,
+  );
+  if (!item) throw new Error(`Project item not found: ${params.projectItemId}`);
+
+  const time = await safe(
+    "TickTime.createWithSeconds",
+    async () => ppro.TickTime.createWithSeconds(Number(params.timeSeconds)),
+    null,
+  );
+  const editor = await safe("SequenceEditor.getEditor", async () => ppro.SequenceEditor.getEditor(sequence), null);
+
+  const result = {
+    inserted: false,
+    mode: params.overwrite ? "overwrite" : "insert",
+    videoTrackIndex: Number(params.videoTrackIndex || 0),
+    audioTrackIndex: Number(params.audioTrackIndex || 0),
+    timeSeconds: Number(params.timeSeconds),
+    diagnostics,
+  };
+  if (params.debug) {
+    result._reflect = {
+      sequenceEditorStatic: reflectMethods(ppro.SequenceEditor),
+      editor: reflectMethods(editor),
+    };
+  }
+  if (!time || !editor) return result;
+
+  result.inserted = runTransaction(
+    project,
+    () =>
+      params.overwrite
+        ? editor.createOverwriteItemAction(item, time, result.videoTrackIndex, result.audioTrackIndex)
+        : editor.createInsertProjectItemAction(
+            item,
+            time,
+            result.videoTrackIndex,
+            result.audioTrackIndex,
+            Boolean(params.limitShift),
+          ),
+    "Gospelo bridge: insert clip",
+    diagnostics,
+  );
+  return result;
+}
+
+async function addMarker(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (!params.name || typeof params.name !== "string") {
+    throw new Error("name is required.");
+  }
+  if (params.timeSeconds === undefined || params.timeSeconds === null) {
+    throw new Error("timeSeconds is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+
+  const markers = await safe("Markers.getMarkers", async () => await ppro.Markers.getMarkers(sequence), null);
+  const startTime = await safe(
+    "TickTime.createWithSeconds(start)",
+    async () => ppro.TickTime.createWithSeconds(Number(params.timeSeconds)),
+    null,
+  );
+  const duration =
+    params.durationSeconds !== undefined && params.durationSeconds !== null
+      ? await safe(
+          "TickTime.createWithSeconds(duration)",
+          async () => ppro.TickTime.createWithSeconds(Number(params.durationSeconds)),
+          null,
+        )
+      : null;
+
+  const result = {
+    added: false,
+    name: params.name,
+    timeSeconds: Number(params.timeSeconds),
+    markerCount: null,
+    diagnostics,
+  };
+  if (params.debug) {
+    result._reflect = {
+      markersStatic: reflectMethods(ppro.Markers),
+      markers: reflectMethods(markers),
+    };
+  }
+  if (!markers || !startTime) return result;
+
+  result.added = runTransaction(
+    project,
+    () =>
+      markers.createAddMarkerAction(
+        params.name,
+        typeof params.markerType === "string" ? params.markerType : "Comment",
+        startTime,
+        duration || undefined,
+        typeof params.comments === "string" ? params.comments : undefined,
+      ),
+    "Gospelo bridge: add marker",
+    diagnostics,
+  );
+
+  // Read back the marker count so the caller gets immediate confirmation.
+  const list = (await safe("markers.getMarkers", async () => await markers.getMarkers(), null)) || null;
+  if (list && typeof list.length === "number") result.markerCount = list.length;
   return result;
 }
 

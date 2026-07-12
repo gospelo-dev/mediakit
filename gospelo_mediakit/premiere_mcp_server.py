@@ -167,6 +167,170 @@ async def premiere_export_frame(
 
 
 @mcp.tool()
+async def premiere_create_project(
+    path: str,
+    import_paths: list[str] | None = None,
+    sequence_name: str | None = None,
+    include_reflection: bool = False,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    """Create a NEW Premiere project, optionally with media and a sequence.
+
+    Intended for setting up disposable test projects so that timeline-writing
+    operations can be exercised without touching a real editing project.
+    The new project is created at ``path`` and becomes the active project in
+    Premiere (the previously active project stays open but loses focus).
+    Existing projects and media files are never modified.
+
+    Args:
+        path: Absolute path for the new ``.prproj`` file. Must not already
+            exist.
+        import_paths: Optional media file paths to import into the new
+            project's root bin.
+        sequence_name: If given (and media was imported), create a sequence
+            with this name from the imported clips.
+        include_reflection: Attach ``_reflect`` (available Project method
+            names) to aid diagnosing API coverage. Off by default.
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "created": true, "project": {...}, "importedCount": N,
+        "sequence": {...} | null, "diagnostics": [...]}`` on success.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    import os
+
+    path = os.path.abspath(os.path.expanduser(path))
+    if not path.endswith(".prproj"):
+        return {"ok": False, "error": "path must end with .prproj"}
+    if os.path.exists(path):
+        return {"ok": False, "error": f"path already exists: {path}"}
+    parent = os.path.dirname(path)
+    os.makedirs(parent, exist_ok=True)
+
+    params: dict[str, Any] = {"path": path, "debug": include_reflection}
+    if import_paths:
+        missing = [p for p in import_paths if not os.path.isfile(os.path.expanduser(p))]
+        if missing:
+            return {"ok": False, "error": f"import files not found: {missing}"}
+        params["importPaths"] = [os.path.abspath(os.path.expanduser(p)) for p in import_paths]
+    if sequence_name:
+        params["sequenceName"] = sequence_name
+
+    try:
+        result = await _get_bridge().request(
+            "project.create",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_insert_clip(
+    project_item_id: str,
+    time_seconds: float,
+    video_track_index: int = 0,
+    audio_track_index: int = 0,
+    overwrite: bool = False,
+    limit_shift: bool = False,
+    include_reflection: bool = False,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Insert a project item into the active Premiere sequence (WRITE).
+
+    This MODIFIES the timeline of the active sequence. The edit is committed
+    as a single undoable transaction (Edit > Undo reverts it). Verify the
+    result with ``premiere_get_sequence_state`` afterwards.
+
+    Args:
+        project_item_id: Asset ID from ``premiere_list_project_assets``.
+        time_seconds: Timeline position to insert at.
+        video_track_index / audio_track_index: Target tracks (0-based).
+        overwrite: True replaces existing material at that range; False
+            (default) inserts and shifts later clips.
+        limit_shift: Insert mode only — limit shifting to the target tracks.
+        include_reflection: Attach ``_reflect`` (SequenceEditor method names).
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "inserted": true, ...}`` on success; ``diagnostics``
+        lists any failed UXP calls. On failure ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "sequence.insertClip",
+            {
+                "projectItemId": project_item_id,
+                "timeSeconds": time_seconds,
+                "videoTrackIndex": video_track_index,
+                "audioTrackIndex": audio_track_index,
+                "overwrite": overwrite,
+                "limitShift": limit_shift,
+                "debug": include_reflection,
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+async def premiere_add_marker(
+    name: str,
+    time_seconds: float,
+    duration_seconds: float | None = None,
+    comments: str | None = None,
+    marker_type: str = "Comment",
+    include_reflection: bool = False,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Add a marker to the active Premiere sequence (WRITE).
+
+    This MODIFIES the active sequence's markers. The edit is committed as a
+    single undoable transaction. The response includes the sequence's marker
+    count read back after the edit.
+
+    Args:
+        name: Marker name.
+        time_seconds: Marker position on the sequence timeline.
+        duration_seconds: Optional marker duration.
+        comments: Optional marker comment text.
+        marker_type: Premiere marker type (default ``Comment``).
+        include_reflection: Attach ``_reflect`` (Markers method names).
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "added": true, "markerCount": N, ...}`` on success;
+        ``diagnostics`` lists any failed UXP calls. On failure
+        ``{"ok": false, "error": "..."}``.
+    """
+    params: dict[str, Any] = {
+        "name": name,
+        "timeSeconds": time_seconds,
+        "markerType": marker_type,
+        "debug": include_reflection,
+    }
+    if duration_seconds is not None:
+        params["durationSeconds"] = duration_seconds
+    if comments is not None:
+        params["comments"] = comments
+
+    try:
+        result = await _get_bridge().request(
+            "sequence.addMarker",
+            params,
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

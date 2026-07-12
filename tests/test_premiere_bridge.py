@@ -155,6 +155,113 @@ def test_export_frame_round_trip():
     asyncio.run(run())
 
 
+def test_create_project_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "project.create",
+                {"path": "/tmp/bridge-test.prproj", "importPaths": ["/tmp/a.mp4"], "sequenceName": "test"},
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "project.create"
+        assert request["params"]["sequenceName"] == "test"
+
+        payload = {
+            "created": True,
+            "project": {"name": "bridge-test.prproj", "path": "/tmp/bridge-test.prproj"},
+            "importedCount": 1,
+            "sequence": {"name": "test"},
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["created"] is True
+        assert result["importedCount"] == 1
+
+    asyncio.run(run())
+
+
+def test_insert_clip_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "sequence.insertClip",
+                {"projectItemId": "abc", "timeSeconds": 10.0, "videoTrackIndex": 0},
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "sequence.insertClip"
+        assert request["params"]["projectItemId"] == "abc"
+
+        await bridge._receive_message(
+            json.dumps(
+                {
+                    "type": "response",
+                    "id": request["id"],
+                    "ok": True,
+                    "result": {"inserted": True, "mode": "insert", "diagnostics": []},
+                }
+            )
+        )
+        result = await request_task
+        assert result["inserted"] is True
+
+    asyncio.run(run())
+
+
+def test_add_marker_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "sequence.addMarker",
+                {"name": "m1", "timeSeconds": 5.0, "markerType": "Comment"},
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "sequence.addMarker"
+        assert request["params"]["name"] == "m1"
+
+        await bridge._receive_message(
+            json.dumps(
+                {
+                    "type": "response",
+                    "id": request["id"],
+                    "ok": True,
+                    "result": {"added": True, "markerCount": 1, "diagnostics": []},
+                }
+            )
+        )
+        result = await request_task
+        assert result["added"] is True
+        assert result["markerCount"] == 1
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()
