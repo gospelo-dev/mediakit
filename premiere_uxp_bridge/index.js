@@ -5,6 +5,55 @@
 // be an explicit, reviewed bridge method.
 const ppro = require("premierepro");
 const { entrypoints } = require("uxp");
+const { secureStorage } = require("uxp").storage;
+
+// The bridge token is kept in UXP secureStorage (encrypted, per-plugin) so it
+// survives panel reloads without re-entry. It is saved only after a
+// successful authenticated connect, and removed via the "Forget token" button.
+const TOKEN_STORAGE_KEY = "gospeloBridgeToken";
+
+// Premiere's UXP runtime has no TextEncoder/TextDecoder, so convert the
+// (ASCII) token to bytes manually.
+function tokenToBytes(token) {
+  return Uint8Array.from(token, (ch) => ch.charCodeAt(0) & 0xff);
+}
+
+function bytesToToken(data) {
+  let out = "";
+  for (let i = 0; i < data.length; i++) out += String.fromCharCode(data[i]);
+  return out;
+}
+
+async function saveToken(token) {
+  try {
+    await secureStorage.setItem(TOKEN_STORAGE_KEY, tokenToBytes(token));
+    console.error("[bridge] token saved to secure storage"); // Error level so UDT APP LOGS shows it
+  } catch (error) {
+    console.error("[bridge] saveToken failed:", String((error && error.message) || error));
+  }
+}
+
+async function loadSavedToken() {
+  try {
+    const data = await secureStorage.getItem(TOKEN_STORAGE_KEY);
+    if (data && data.length) {
+      console.error("[bridge] token restored from secure storage");
+      return bytesToToken(data);
+    }
+    console.error("[bridge] no saved token in secure storage (getItem returned empty)");
+  } catch (error) {
+    console.error("[bridge] loadSavedToken failed:", String((error && error.message) || error));
+  }
+  return "";
+}
+
+async function forgetToken() {
+  try {
+    await secureStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch (_) {
+    // Nothing stored.
+  }
+}
 
 // UXP only trusts publicly-issued certificates (not self-signed / mkcert /
 // private-CA / macOS-keychain trust). So the panel must connect to a hostname
@@ -62,6 +111,7 @@ function connect() {
       const message = JSON.parse(event.data);
       if (message.type === "hello_ack") {
         setStatus("Connected. Keep this panel open.");
+        await saveToken(currentToken); // persist only tokens that authenticated
         return;
       }
       if (message.type !== "request" || typeof message.id !== "string") {
@@ -655,11 +705,48 @@ async function addMarker(params) {
   return result;
 }
 
+async function restoreTokenAndConnect() {
+  const saved = await loadSavedToken();
+  if (!saved) {
+    setStatus("No saved token. Enter the bridge token and press Connect.");
+    return;
+  }
+  currentToken = saved;
+  const tokenInput = document.getElementById("token");
+  if (tokenInput) tokenInput.value = saved;
+  setStatus("Restored saved token. Connecting…");
+  connect();
+}
+
+function onForget() {
+  currentToken = "";
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  const tokenInput = document.getElementById("token");
+  if (tokenInput) tokenInput.value = "";
+  if (socket) {
+    socket.onclose = null; // keep the "forgotten" status; no retry banner
+    socket.onerror = null;
+    try {
+      socket.close();
+    } catch (_) {
+      // Already closed.
+    }
+    socket = null;
+  }
+  forgetToken();
+  setStatus("Token forgotten. Enter a bridge token to connect.");
+}
+
 entrypoints.setup({
   panels: {
     "gospelo-premiere-bridge-panel": {
       create() {
         document.getElementById("connect").addEventListener("click", connect);
+        document.getElementById("forget").addEventListener("click", onForget);
+        restoreTokenAndConnect();
       },
       show() {
         if (currentToken) connect();

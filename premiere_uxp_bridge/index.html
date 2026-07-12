@@ -16,10 +16,12 @@
     <label for="token">Bridge token</label>
     <input id="token" type="password" autocomplete="off" />
     <button id="connect" type="button">Connect</button>
+    <button id="forget" type="button">Forget token</button>
     <div id="status">Waiting for a bridge token.</div>
     <p class="note">
-      Keep this panel open while using the Python MCP server. This version
-      exposes only a read-only project-asset listing.
+      Keep this panel open while using the Python MCP server. The token is
+      saved to UXP secure storage after a successful connect, and restored
+      (with auto-connect) when the panel reopens.
     </p>
     <script src="index.js"></script>
   </body>
