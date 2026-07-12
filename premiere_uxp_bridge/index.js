@@ -139,6 +139,8 @@ function connect() {
         result = await importMedia(params);
       } else if (message.method === "sequence.moveClip") {
         result = await moveClip(params);
+      } else if (message.method === "sequence.setTrackMute") {
+        result = await setTrackMute(params);
       } else {
         throw new Error(`Unsupported bridge method: ${message.method}`);
       }
@@ -929,6 +931,49 @@ async function moveClip(params) {
     diagnostics,
   );
   return result;
+}
+
+// ---- sequence.setTrackMute (mute/unmute a track) ------------------------------
+// track.setMute is a documented direct setter (not an action/transaction).
+// The response reports the observed before/after state so the caller gets an
+// act -> observe confirmation in one round trip.
+
+async function setTrackMute(params) {
+  const project = await ppro.Project.getActiveProject();
+  if (!project) throw new Error("No active project is open.");
+  const sequence = await project.getActiveSequence();
+  if (!sequence) throw new Error("No active sequence. Open a sequence in the timeline, then retry.");
+  if (params.mute === undefined || params.mute === null) {
+    throw new Error("mute (true/false) is required.");
+  }
+
+  const diagnostics = [];
+  const safe = makeSafe(diagnostics);
+  const trackType = params.trackType === "video" ? "video" : "audio";
+  const trackIndex = Number(params.trackIndex || 0);
+
+  const track = await safe(
+    `${trackType}Track(${trackIndex})`,
+    async () =>
+      trackType === "video" ? await sequence.getVideoTrack(trackIndex) : await sequence.getAudioTrack(trackIndex),
+    null,
+  );
+  if (!track) throw new Error(`Track not found: ${trackType}[${trackIndex}]`);
+
+  const before = await safe("isMuted(before)", async () => await track.isMuted(), null);
+  const setReturn = await safe("setMute", async () => await track.setMute(Boolean(params.mute)), null);
+  const after = await safe("isMuted(after)", async () => await track.isMuted(), null);
+
+  return {
+    trackType,
+    trackIndex,
+    requested: Boolean(params.mute),
+    mutedBefore: before,
+    mutedAfter: after,
+    changed: before !== after,
+    setReturn,
+    diagnostics,
+  };
 }
 
 // ---- sequence.importCaptions (SRT -> caption track) --------------------------

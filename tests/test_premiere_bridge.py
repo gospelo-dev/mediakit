@@ -372,6 +372,44 @@ def test_move_clip_round_trip():
     asyncio.run(run())
 
 
+def test_set_track_mute_round_trip():
+    async def run() -> None:
+        bridge = _bridge()
+        connection = _FakeConnection()
+        bridge._client = connection
+        bridge._connected.set()
+
+        request_task = asyncio.create_task(
+            bridge.request(
+                "sequence.setTrackMute",
+                {"trackType": "audio", "trackIndex": 0, "mute": True},
+                timeout_seconds=1,
+            )
+        )
+        await asyncio.sleep(0)
+        request = json.loads(connection.sent[0])
+        assert request["method"] == "sequence.setTrackMute"
+        assert request["params"]["mute"] is True
+
+        payload = {
+            "trackType": "audio",
+            "trackIndex": 0,
+            "requested": True,
+            "mutedBefore": False,
+            "mutedAfter": True,
+            "changed": True,
+            "diagnostics": [],
+        }
+        await bridge._receive_message(
+            json.dumps({"type": "response", "id": request["id"], "ok": True, "result": payload})
+        )
+        result = await request_task
+        assert result["mutedAfter"] is True
+        assert result["changed"] is True
+
+    asyncio.run(run())
+
+
 def test_request_rejects_methods_not_exposed_by_the_plugin():
     async def run() -> None:
         bridge = _bridge()

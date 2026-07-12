@@ -118,6 +118,7 @@ class PremiereBridge:
             "sequence.insertMogrt",
             "project.importMedia",
             "sequence.moveClip",
+            "sequence.setTrackMute",
         }
     )
 

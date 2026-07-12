@@ -594,6 +594,41 @@ async def premiere_move_clip(
 
 
 @mcp.tool()
+async def premiere_set_track_mute(
+    mute: bool,
+    track_type: str = "audio",
+    track_index: int = 0,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Mute or unmute a track on the active sequence (WRITE).
+
+    Uses Premiere's documented ``track.setMute`` setter and reads the state
+    back, so the response is its own act -> observe confirmation. Note this
+    is MUTE (silences/hides output), not track LOCK — Premiere's UXP API has
+    no lock operation yet.
+
+    Args:
+        mute: True to mute, False to unmute.
+        track_type: ``"audio"`` (default) or ``"video"``.
+        track_index: 0-based track index (A1 is audio/0).
+        timeout_seconds: Connection and response timeout (1-60 seconds).
+
+    Returns:
+        ``{"ok": true, "mutedBefore": ..., "mutedAfter": ..., "changed": ...}``.
+        On failure returns ``{"ok": false, "error": "..."}``.
+    """
+    try:
+        result = await _get_bridge().request(
+            "sequence.setTrackMute",
+            {"trackType": track_type, "trackIndex": track_index, "mute": mute},
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, **result}
+    except PremiereBridgeError as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
 async def premiere_bridge_status() -> dict[str, Any]:
     """Check whether the local Premiere UXP bridge is connected.
 

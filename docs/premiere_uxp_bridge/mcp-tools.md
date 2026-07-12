@@ -336,6 +336,22 @@ L1 状態が予測したとおり該当時刻のクリップ（`misaki_9_colorma
 
 ---
 
+## premiere_set_track_mute（write）
+
+アクティブシーケンスのトラックをミュート/解除する（`sequence.setTrackMute` →
+公式 API `track.setMute`）。応答に before/after の実測値を含むため、1 往復で
+act → observe が完結する。**ミュートであってロックではない**（トラックロックの
+操作 API は UXP に存在しない — `EVENT_TRACK_LOCK_CHANGED` イベントのみ）。
+
+**引数**: `mute`（必須）, `track_type`（既定 `audio`）, `track_index`（既定 0 = A1）
+
+**戻り値**（実測）: `{"ok": true, "trackType": "audio", "trackIndex": 0, "requested": true, "mutedBefore": false, "mutedAfter": true, "changed": true, "diagnostics": []}`
+
+**検証結果**: A1 のミュートを実行、`mutedBefore: false → mutedAfter: true` を
+実測確認。diagnostics 0 件。
+
+---
+
 ## premiere_import_captions（write）
 
 SRT をプロジェクトへ読み込む（`sequence.importCaptions`）。タイムライン配置は
@@ -406,6 +422,7 @@ Python ブリッジ（`gospelo_mediakit/premiere/bridge.py`）はメソッド al
 | `premiere_add_marker` | `sequence.addMarker` | write（取り消し可能） |
 | `premiere_import_media` | `project.importMedia` | write（ビンへの追加のみ） |
 | `premiere_move_clip` | `sequence.moveClip` | write（取り消し可能・垂直移動は clone+remove 合成） |
+| `premiere_set_track_mute` | `sequence.setTrackMute` | write（直接セッター・応答に before/after） |
 | `premiere_import_captions` | `sequence.importCaptions` | write（読み込みのみ・配置は手動1ドラッグ） |
 | `premiere_add_telops` | `sequence.insertMogrt`（キューごと） | write（取り消し可能・完全自動） |
 
